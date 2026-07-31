@@ -30,6 +30,119 @@ function circleMethodRounds(entities) {
   return rounds;
 }
 
+// Paarismängu jaoks: TÄPSELT võrdne mängude arv kõigile — iga paar mängib iga teise paariga
+// täpselt ÜKS kord, mitte kunagi rohkem (korduseid ei ole kunagi, seega mängude arv on alati
+// täpselt (paaride arv - 1) igaühele, ilma eranditeta). Väljakud täidetakse võimalikult täis,
+// aga viimane(sed) ajaperiood(id) võivad väljakupuudusel jääda osaliseks — see on ainuke koht,
+// kus mõni väljak võib tühjaks jääda.
+export function generateExactRoundRobin({ entities, entityPlayers, courts, maxSlots = Infinity }) {
+  const n = entities.length;
+  const matchesPerSlot = Math.max(0, Math.min(courts, Math.floor(n / 2)));
+  if (matchesPerSlot === 0 || n < 2) return [];
+
+  // Kui väljakuid jagub, et TÄIS ring korraga ära mahuks (courts >= floor(n/2)), kasuta
+  // deterministlikku ring-meetodit — see garanteerib matemaatiliselt, et IGA ajaperiood
+  // on täis (mitte ainult enamik), ilma juhusliku otsingu ebaõnneta. Juhuslik ahne otsing
+  // allpool on vajalik AINULT siis, kui väljakud on päriselt kitsaskohaks (courts < floor(n/2)) —
+  // just seal võib lõppu jääda osalisi perioode, mida tuleb otsingul optimeerida.
+  if (matchesPerSlot === Math.floor(n / 2)) {
+    const rounds = circleMethodRounds(entities)
+      .map((pairs) => pairs.filter(([a, b]) => a !== undefined && b !== undefined))
+      .filter((pairs) => pairs.length > 0)
+      .slice(0, maxSlots);
+    return rounds.map((pairs) => {
+      const activeIds = new Set(pairs.flat());
+      const resting = entities.filter((id) => !activeIds.has(id));
+      return {
+        matches: pairs.map(([a, b]) => ({ side1: entityPlayers[a], side2: entityPlayers[b] })),
+        resting: resting.flatMap((id) => entityPlayers[id]),
+      };
+    });
+  }
+
+  // Väljakud on päriselt kitsaskohaks (courts < floor(n/2)): igal ring-meetodi voorul
+  // on täpselt floor(n/2) mängu (garanteeritult ilma konfliktideta, sest need on ühe
+  // "matching'u" osad) — jaotame IGA vooru mängud otse `courts`-suurusteks täis
+  // ajaperioodideks (need on automaatselt konfliktivabad, sest on vooru alamhulk) ja
+  // kogume ainult iga vooru "ülejäägi" (mis on väikevõrra alla courts) ühte kogumisse.
+  // Ainult see väike ülejäägi-kogum vajab juhuslikku otsingut kokkupakkimiseks — seega
+  // kõik täis-perioodid on garanteeritud täiuslikud ja ainuke koht, kus osaline periood
+  // üldse tekkida saab, on kõige lõpus (ülejäägi-perioodid tulevad alati viimasena).
+  const rounds = circleMethodRounds(entities);
+  const fullSlots = [];
+  const leftoverPairs = [];
+  for (const roundPairs of rounds) {
+    for (let i = 0; i + matchesPerSlot <= roundPairs.length; i += matchesPerSlot) {
+      fullSlots.push(roundPairs.slice(i, i + matchesPerSlot));
+    }
+    const remainderStart = Math.floor(roundPairs.length / matchesPerSlot) * matchesPerSlot;
+    for (let i = remainderStart; i < roundPairs.length; i++) leftoverPairs.push(roundPairs[i]);
+  }
+
+  // Üks katse: paki ülejäägi-mängud ahnelt slottidesse (iga slot proovitakse mitme
+  // juhusliku järjestusega täita nii täis kui võimalik).
+  function attemptOnce() {
+    let remaining = leftoverPairs;
+    const out = [];
+    while (remaining.length > 0) {
+      let best = null;
+      const tries = Math.max(150, remaining.length * 5);
+      for (let a = 0; a < tries; a++) {
+        const order = shuffle(remaining);
+        const busy = new Set();
+        const picked = [];
+        for (const pair of order) {
+          if (picked.length >= matchesPerSlot) break;
+          const [x, y] = pair;
+          if (!busy.has(x) && !busy.has(y)) {
+            picked.push(pair);
+            busy.add(x);
+            busy.add(y);
+          }
+        }
+        if (!best || picked.length > best.length) {
+          best = picked;
+          if (best.length === matchesPerSlot) break; // täis — parem ei saagi
+        }
+      }
+      if (!best || best.length === 0) break; // ummikseis, ei tohiks tavajuhul juhtuda
+      out.push(best);
+      const usedKeys = new Set(best.map(([a, b]) => pairKey(a, b)));
+      remaining = remaining.filter(([a, b]) => !usedKeys.has(pairKey(a, b)));
+    }
+    return out;
+  }
+
+  // Proovi mitu katset ülejäägi kokkupakkimiseks ja jäta parim: kõigepealt kõige vähem
+  // ajaperioode kokku, siis kõige vähem osalisi — see väike kogum pakib peaaegu alati
+  // täielikult kokku, sest see on juba niigi väike (üks mäng vooru kohta).
+  const outerAttempts = leftoverPairs.length <= 30 ? 25 : leftoverPairs.length <= 60 ? 12 : 5;
+  let bestLeftoverSlots = leftoverPairs.length ? null : [];
+  let bestScore = Infinity;
+  for (let oa = 0; oa < outerAttempts && leftoverPairs.length; oa++) {
+    const candidate = attemptOnce();
+    const partial = candidate.filter((s) => s.length < matchesPerSlot).length;
+    const waste = candidate.reduce((sum, s) => sum + (matchesPerSlot - s.length), 0);
+    const score = candidate.length * 1000 + partial * 10 + waste;
+    if (score < bestScore) {
+      bestScore = score;
+      bestLeftoverSlots = candidate;
+      if (partial <= 1 && waste <= 1) break; // juba nii hea kui olla saab
+    }
+  }
+
+  const bestSlots = [...fullSlots, ...bestLeftoverSlots].slice(0, maxSlots);
+
+  return bestSlots.map((best) => {
+    const activeIds = new Set(best.flat());
+    const resting = entities.filter((id) => !activeIds.has(id));
+    return {
+      matches: best.map(([a, b]) => ({ side1: entityPlayers[a], side2: entityPlayers[b] })),
+      resting: resting.flatMap((id) => entityPlayers[id]),
+    };
+  });
+}
+
 // Ühtne, õiglane ajakava genereerija — kasutatakse nii üksikmängus (entity = mängija)
 // kui paarismängus (entity = fikseeritud paar; paarilised mängivad alati koos).
 // Igal ajaslotil valitakse mängu need osalejad, kes on seni kõige vähem mänginud
@@ -141,6 +254,16 @@ export function estimateRoundsForFullCoverage(entityCount, courts) {
   const safeCap = entityCount * entityCount + 4;
   const slots = generateFairSlots({ entities, entityPlayers, courts, maxSlots: safeCap, mode: 'roundrobin' });
   return slots.length;
+}
+
+// Sama, aga paarismängu jaoks kasutatava korduseta ajastaja (generateExactRoundRobin) järgi —
+// annab täpse ajaperioodide arvu, mida seaded-ekraan mängu pikkuse arvutamiseks kasutab.
+export function estimateExactRoundRobinSlots(entityCount, courts) {
+  if (entityCount < 2 || courts < 1) return 0;
+  const entities = Array.from({ length: entityCount }, (_, i) => 'x' + i);
+  const entityPlayers = {};
+  entities.forEach((id) => (entityPlayers[id] = [id]));
+  return generateExactRoundRobin({ entities, entityPlayers, courts }).length;
 }
 
 // Üksikmängu jaoks: kõik ei pea kõigiga läbi mängima, mängu pikkus jäägu mõistlikku

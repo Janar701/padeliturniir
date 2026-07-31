@@ -1,6 +1,35 @@
 // Pingerea arvutamine mängija (mitte paari) põhiselt — töötab nii üksik- kui paarismängu
 // ja Americano puhul, kus partnerid vahetuvad.
-export function computeStandings(tournament) {
+
+// Kuidas võitja/pingerida selgub — vt app.js "Võitja selgub" seadet:
+// 'wins'         — kõige rohkem võidetud mänge
+// 'points'       — kõige rohkem kogutud geimipunkte (skooride summa)
+// 'leaguePoints' — võit 4p, viik 2p, kaotus 0p, kõige rohkem kogunenud punkte
+export function metricValue(row, method) {
+  if (method === 'points') return row.pointsFor;
+  if (method === 'leaguePoints') return row.wins * 4 + row.draws * 2;
+  return row.wins;
+}
+
+export function methodLabel(method) {
+  if (method === 'points') return 'kogutud geimipunktide';
+  if (method === 'leaguePoints') return 'võit/viik/kaotus punktide';
+  return 'võitude';
+}
+
+function sortByMethod(rows, method) {
+  return [...rows].sort((a, b) => {
+    const diff = metricValue(b, method) - metricValue(a, method);
+    if (diff !== 0) return diff;
+    const diffA = a.pointsFor - a.pointsAgainst;
+    const diffB = b.pointsFor - b.pointsAgainst;
+    if (diffB !== diffA) return diffB - diffA;
+    if (b.pointsFor !== a.pointsFor) return b.pointsFor - a.pointsFor;
+    return a.name.localeCompare(b.name, 'et');
+  });
+}
+
+function buildIndividualRows(tournament) {
   const table = {};
   tournament.players.forEach((p) => {
     table[p.id] = { id: p.id, name: p.name, wins: 0, losses: 0, draws: 0, played: 0, pointsFor: 0, pointsAgainst: 0 };
@@ -30,19 +59,12 @@ export function computeStandings(tournament) {
     });
   });
 
-  return Object.values(table).sort((a, b) => {
-    if (b.wins !== a.wins) return b.wins - a.wins;
-    const diffA = a.pointsFor - a.pointsAgainst;
-    const diffB = b.pointsFor - b.pointsAgainst;
-    if (diffB !== diffA) return diffB - diffA;
-    if (b.pointsFor !== a.pointsFor) return b.pointsFor - a.pointsFor;
-    return a.name.localeCompare(b.name, 'et');
-  });
+  return Object.values(table);
 }
 
-// Paaripõhine pingerida paarismängu jaoks — paarilised mängivad kogu turniiri koos,
-// nii et paari tulemus on lihtsalt selle paari mängude summa.
-export function computeTeamStandings(tournament) {
+// Paaripõhine — paarilised mängivad kogu turniiri koos, nii et paari tulemus on
+// lihtsalt selle paari mängude summa.
+function buildTeamRows(tournament) {
   if (!tournament.teams || !tournament.teams.length) return [];
   const playerToTeam = {};
   tournament.teams.forEach((team) => team.playerIds.forEach((pid) => (playerToTeam[pid] = team.id)));
@@ -74,12 +96,35 @@ export function computeTeamStandings(tournament) {
     });
   });
 
-  return Object.values(table).sort((a, b) => {
-    if (b.wins !== a.wins) return b.wins - a.wins;
-    const diffA = a.pointsFor - a.pointsAgainst;
-    const diffB = b.pointsFor - b.pointsAgainst;
-    if (diffB !== diffA) return diffB - diffA;
-    if (b.pointsFor !== a.pointsFor) return b.pointsFor - a.pointsFor;
-    return a.name.localeCompare(b.name, 'et');
-  });
+  return Object.values(table);
+}
+
+export function computeStandings(tournament, method = 'wins') {
+  return sortByMethod(buildIndividualRows(tournament), method);
+}
+
+export function computeTeamStandings(tournament, method = 'wins') {
+  return sortByMethod(buildTeamRows(tournament), method);
+}
+
+// Kui pingerea tipus on viik valitud meetodi järgi, proovi mõne teise meetodiga leida
+// ühene juht — kasutatakse "hetkel juhib / võitja" bänneris viigi korral vihjena.
+export function findLeaderWithTieInfo(standings, method) {
+  const played = standings.filter((r) => r.played > 0);
+  if (!played.length) return null;
+  const topVal = metricValue(played[0], method);
+  const tiedLeaders = played.filter((r) => metricValue(r, method) === topVal);
+  if (tiedLeaders.length <= 1) {
+    return { leader: played[0], tie: false };
+  }
+  const otherMethods = ['wins', 'leaguePoints', 'points'].filter((m) => m !== method);
+  for (const altMethod of otherMethods) {
+    const altSorted = sortByMethod(tiedLeaders, altMethod);
+    const altTop = metricValue(altSorted[0], altMethod);
+    const altTied = altSorted.filter((r) => metricValue(r, altMethod) === altTop);
+    if (altTied.length === 1) {
+      return { leader: played[0], tie: true, altLeader: altSorted[0], altMethod };
+    }
+  }
+  return { leader: played[0], tie: true, altLeader: null, altMethod: null };
 }

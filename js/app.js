@@ -1,6 +1,6 @@
 import * as State from './state.js';
 import * as Schedule from './schedule.js';
-import { computeStandings, computeTeamStandings } from './standings.js';
+import { computeStandings, computeTeamStandings, findLeaderWithTieInfo, methodLabel } from './standings.js';
 import { buildViewUrl, buildEditUrl, parseShareHash } from './share.js';
 import { isCloudConfigured, cloudGet, cloudWatch, queryMyTournaments, getCurrentUser, onAuthChange, signInWithGoogle, signOutUser } from './cloud.js';
 import { uid, shuffle } from './util.js';
@@ -351,6 +351,10 @@ function escapeHtml(s) {
   return (s || '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+function capitalize(s) {
+  return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+}
+
 // ---------------------------------------------------------------------------
 // SEADED (eraldi ekraan)
 // ---------------------------------------------------------------------------
@@ -409,6 +413,7 @@ function renderSettingsScreen(existing) {
         playersCount: 8,
         startTime: '09:00',
         finalists: 0,
+        winnerRule: 'wins',
       };
 
   appEl.innerHTML = `
@@ -474,6 +479,15 @@ function renderSettingsScreen(existing) {
         <p class="muted small" id="finalistsHelp"></p>
       </div>
 
+      <div class="field">
+        <label>Võitja selgub ${infoIcon('Määrab, mille järgi pingerida ja võitja arvutatakse. Kui valitud viisi järgi tekib viik, näidatakse lisaks, kes juhiks mõne teise arvestuse järgi.')}</label>
+        <div class="radio-group">
+          <label><input type="radio" name="f_winnerrule" value="wins" ${s.winnerRule === 'wins' || !s.winnerRule ? 'checked' : ''}/> Kõige rohkem võidetud mänge</label>
+          <label><input type="radio" name="f_winnerrule" value="points" ${s.winnerRule === 'points' ? 'checked' : ''}/> Kõige rohkem kogutud geimipunkte (skooride summa)</label>
+          <label><input type="radio" name="f_winnerrule" value="leaguePoints" ${s.winnerRule === 'leaguePoints' ? 'checked' : ''}/> Punktisüsteem: võit 4p, viik 2p, kaotus 0p</label>
+        </div>
+      </div>
+
       <p id="settingsError" class="error hidden"></p>
 
       <div class="row-gap">
@@ -516,7 +530,7 @@ function renderSettingsScreen(existing) {
       // Väljakud täidetakse pidevalt (õiglane, kõige vähem mänginud paarid mängivad esimesena) —
       // "ajaperioodide" arv ei pruugi olla täpselt (paaride arv - 1), aga iga paar jõuab
       // turniiri lõpuks siiski täpselt niipalju mänge mängida, kui tal on vastaseid.
-      const rounds = Schedule.estimateRoundsForFullCoverage(entityCount, courts);
+      const rounds = Schedule.estimateExactRoundRobinSlots(entityCount, courts);
       const gamesPerPair = entityCount - 1;
       const raw = (tournamentMinutes - (rounds - 1) * pauseMinutes) / rounds;
       const mm = Math.floor(raw);
@@ -569,6 +583,7 @@ function renderSettingsScreen(existing) {
       playersCount: parseInt(document.getElementById('f_players').value, 10),
       startTime: `${String(parseInt(document.getElementById('f_starttime_h').value, 10)).padStart(2, '0')}:${String(parseInt(document.getElementById('f_starttime_m').value, 10)).padStart(2, '0')}`,
       finalists: parseInt(document.getElementById('f_finalists').value, 10),
+      winnerRule: document.querySelector('input[name="f_winnerrule"]:checked').value,
     };
     const errEl = document.getElementById('settingsError');
     const minNeeded = isDoublesFormat(settings.format) ? 4 : 2;
@@ -805,10 +820,10 @@ function buildSchedule(t, teamOrderIds) {
     t.teams = teams;
     const entityPlayers = {};
     teams.forEach((team) => (entityPlayers[team.id] = team.playerIds));
-    // Väljakud täidetakse pidevalt (õiglaselt, vähim mänginud paarid eesotsas) — erinevad
-    // paarid võivad turniiri jooksul olla erineva arvu mänge mänginud, aga turniiri lõpuks
-    // on kõigil täpselt sama palju mänge (kõigi ülejäänud paaride vastu).
-    const rawSlots = Schedule.generateFairSlots({ entities: teams.map((tm) => tm.id), entityPlayers, courts, maxSlots: groupSlots, mode: 'roundrobin' });
+    // Iga paar mängib iga teise paariga TÄPSELT üks kord (mitte kunagi rohkem) — nii on
+    // mängude arv kõigile täpselt võrdne. Väljakud täidetakse võimalikult täis, ainult
+    // viimane(sed) ajaperiood(id) võivad väljakupuudusel jääda osaliseks.
+    const rawSlots = Schedule.generateExactRoundRobin({ entities: teams.map((tm) => tm.id), entityPlayers, courts, maxSlots: groupSlots });
     t.slots = rawSlots.map((s, idx) => ({ round: idx + 1, matches: toMatches(s.matches), resting: s.resting }));
   } else {
     // Üksikmängus ei nõuta täielikku katet, seega "americano" täidab kogu saadaoleva
@@ -826,7 +841,8 @@ function buildSchedule(t, teamOrderIds) {
 // ---------------------------------------------------------------------------
 function renderTournamentScreen(t, { readOnly }) {
   const isDoubles = isDoublesFormat(t.settings.format);
-  const standings = isDoubles ? computeTeamStandings(t) : computeStandings(t);
+  const winnerRule = t.settings.winnerRule || 'wins';
+  const standings = isDoubles ? computeTeamStandings(t, winnerRule) : computeStandings(t, winnerRule);
   const roundWindows = roundTimeWindows(t);
 
   // Grupeeri slotid loogilise vooru järgi — paarismängus võib üks voor (kui väljakuid napib)
@@ -890,21 +906,32 @@ function renderTournamentScreen(t, { readOnly }) {
 
   const standingsHtml = `
     <table class="table standings-table">
-      <thead><tr><th>#</th><th>${isDoubles ? 'Paar' : 'Mängija'}</th><th>V</th><th>K</th><th>V-K</th><th>Mänge</th></tr></thead>
+      <thead><tr><th>#</th><th>${isDoubles ? 'Paar' : 'Mängija'}</th><th>V</th><th>K</th><th>Viik</th><th>Punktid</th><th>V-K</th><th>Mänge</th></tr></thead>
       <tbody>
         ${standings
           .map(
-            (r, i) => `<tr><td>${i + 1}</td><td>${escapeHtml(r.name)}</td><td>${r.wins}</td><td>${r.losses}</td><td>${r.pointsFor - r.pointsAgainst}</td><td>${r.played}</td></tr>`
+            (r, i) => `<tr><td>${i + 1}</td><td>${escapeHtml(r.name)}</td><td>${r.wins}</td><td>${r.losses}</td><td>${r.draws}</td><td>${r.pointsFor}</td><td>${r.pointsFor - r.pointsAgainst}</td><td>${r.played}</td></tr>`
           )
           .join('')}
       </tbody>
     </table>`;
 
   const hasPlayoff = t.settings.finalists > 0;
-  const leader = standings.find((r) => r.played > 0);
+  const leaderInfo = hasPlayoff ? null : findLeaderWithTieInfo(standings, winnerRule);
   const championHtml =
-    !hasPlayoff && leader
-      ? `<div class="champion-banner">${t.phase === 'done' ? `🏆 Turniiri võitja: <strong>${escapeHtml(leader.name)}</strong>` : `Hetkel juhib: <strong>${escapeHtml(leader.name)}</strong>`}</div>`
+    !hasPlayoff && leaderInfo
+      ? `<div class="champion-banner">
+          ${t.phase === 'done' ? `🏆 Turniiri võitja: <strong>${escapeHtml(leaderInfo.leader.name)}</strong>` : `Hetkel juhib: <strong>${escapeHtml(leaderInfo.leader.name)}</strong>`}
+          ${
+            leaderInfo.tie
+              ? `<div class="tie-note">Viik ${methodLabel(winnerRule)} järgi. ${
+                  leaderInfo.altLeader
+                    ? `${capitalize(methodLabel(leaderInfo.altMethod))} järgi juhiks: <strong>${escapeHtml(leaderInfo.altLeader.name)}</strong>`
+                    : 'Viik ka teiste arvestuste järgi.'
+                }</div>`
+              : ''
+          }
+        </div>`
       : '';
 
   const actionButtons = readOnly
@@ -992,7 +1019,8 @@ function renderTournamentScreen(t, { readOnly }) {
 // ---------------------------------------------------------------------------
 function startPlayoffs(t) {
   const isDoubles = isDoublesFormat(t.settings.format);
-  const standings = isDoubles ? computeTeamStandings(t) : computeStandings(t);
+  const winnerRule = t.settings.winnerRule || 'wins';
+  const standings = isDoubles ? computeTeamStandings(t, winnerRule) : computeStandings(t, winnerRule);
   const finalists = standings.slice(0, t.settings.finalists).map((r) => ({ id: r.id, name: r.name }));
   t.bracket = Schedule.generateBracket(finalists);
   t.phase = 'playoffs';
@@ -1059,14 +1087,15 @@ function renderPlayoffScreen(t, { readOnly }) {
   const champion = championSlot ? nameForEntity(t, championSlot.winnerId) : null;
 
   const isDoubles = isDoublesFormat(t.settings.format);
-  const overallStandings = isDoubles ? computeTeamStandings(t) : computeStandings(t);
+  const winnerRule = t.settings.winnerRule || 'wins';
+  const overallStandings = isDoubles ? computeTeamStandings(t, winnerRule) : computeStandings(t, winnerRule);
   const overallStandingsHtml = `
     <table class="table standings-table">
-      <thead><tr><th>#</th><th>${isDoubles ? 'Paar' : 'Mängija'}</th><th>V</th><th>K</th><th>V-K</th><th>Mänge</th></tr></thead>
+      <thead><tr><th>#</th><th>${isDoubles ? 'Paar' : 'Mängija'}</th><th>V</th><th>K</th><th>Viik</th><th>Punktid</th><th>V-K</th><th>Mänge</th></tr></thead>
       <tbody>
         ${overallStandings
           .map(
-            (r, i) => `<tr><td>${i + 1}</td><td>${escapeHtml(r.name)}</td><td>${r.wins}</td><td>${r.losses}</td><td>${r.pointsFor - r.pointsAgainst}</td><td>${r.played}</td></tr>`
+            (r, i) => `<tr><td>${i + 1}</td><td>${escapeHtml(r.name)}</td><td>${r.wins}</td><td>${r.losses}</td><td>${r.draws}</td><td>${r.pointsFor}</td><td>${r.pointsFor - r.pointsAgainst}</td><td>${r.played}</td></tr>`
           )
           .join('')}
       </tbody>

@@ -263,6 +263,12 @@ input[type="number"] { max-width: 140px; }
   border-radius: 10px;
   font-size: 1.05rem;
 }
+.tie-note {
+  margin-top: 6px;
+  font-weight: 500;
+  font-size: 0.85rem;
+  opacity: 0.85;
+}
 
 .bracket { display: flex; gap: 24px; overflow-x: auto; padding-bottom: 10px; }
 .bracket-col { display: flex; flex-direction: column; gap: 20px; justify-content: center; min-width: 220px; }

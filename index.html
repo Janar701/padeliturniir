@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="et">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>Padeliturniir</title>
+<link rel="icon" href="data:," />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a href="#" id="homeLink" class="brand">🎾 Padeliturniir</a>
+    <span id="viewOnlyBadge" class="badge hidden">Vaid vaatamiseks</span>
+    <span id="liveBadge" class="badge badge-live hidden">🔴 Otseülekanne</span>
+  </div>
+</header>
+<div id="cloudErrorBanner" class="cloud-error hidden"></div>
+
+<main id="app" class="app"></main>
+<div id="flashOverlay" class="flash-overlay hidden"></div>
+
+<footer class="footer">
+  <p>Andmed salvestuvad ainult sinu brauserisse (localStorage). Jagamislink sisaldab hetkeseisu tervikuna.</p>
+</footer>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

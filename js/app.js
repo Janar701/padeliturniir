@@ -2,13 +2,14 @@ import * as State from './state.js';
 import * as Schedule from './schedule.js';
 import { computeStandings, computeTeamStandings } from './standings.js';
 import { buildViewUrl, buildEditUrl, parseShareHash } from './share.js';
-import { isCloudConfigured, cloudGet, cloudWatch } from './cloud.js';
+import { isCloudConfigured, cloudGet, cloudWatch, queryMyTournaments, getCurrentUser, onAuthChange, signInWithGoogle, signOutUser } from './cloud.js';
 import { uid, shuffle } from './util.js';
 
 const appEl = document.getElementById('app');
 const badgeEl = document.getElementById('viewOnlyBadge');
 const liveBadgeEl = document.getElementById('liveBadge');
 const cloudErrorEl = document.getElementById('cloudErrorBanner');
+const authAreaEl = document.getElementById('authArea');
 const homeLink = document.getElementById('homeLink');
 
 let pendingPlayers = [];
@@ -24,6 +25,33 @@ window.addEventListener('cloud-error', (e) => {
   cloudErrorTimer = setTimeout(() => cloudErrorEl.classList.add('hidden'), 8000);
 });
 
+// --- Sisselogimine (Google) — et "Minu turniirid" oleks nähtav ka teisest seadmest ---
+function renderAuthArea(user) {
+  if (!isCloudConfigured() || user === undefined) {
+    authAreaEl.innerHTML = '';
+    return;
+  }
+  if (user) {
+    authAreaEl.innerHTML = `
+      <span class="auth-user">${user.photoURL ? `<img class="auth-avatar" src="${escapeHtml(user.photoURL)}" alt="" />` : ''}${escapeHtml(user.displayName || user.email || 'Kasutaja')}</span>
+      <button class="btn btn-secondary small" id="authLogoutBtn">Logi välja</button>`;
+    document.getElementById('authLogoutBtn').addEventListener('click', () => signOutUser());
+  } else {
+    authAreaEl.innerHTML = `<button class="btn btn-secondary small" id="authLoginBtn">Logi sisse Google'iga</button>`;
+    document.getElementById('authLoginBtn').addEventListener('click', () => {
+      signInWithGoogle().catch((err) => {
+        cloudErrorEl.textContent = "⚠️ Sisselogimine ebaõnnestus: " + err.message;
+        cloudErrorEl.classList.remove('hidden');
+      });
+    });
+  }
+}
+
+onAuthChange((user) => {
+  renderAuthArea(user);
+  if (document.getElementById('newBtn')) renderHome();
+});
+
 function stopLiveSync() {
   if (liveUnsub) liveUnsub();
   liveUnsub = null;
@@ -31,17 +59,18 @@ function stopLiveSync() {
   liveBadgeEl.classList.add('hidden');
 }
 
-// --- Vooruaja märguanne: ekraan vilgub ja arvuti räägib, kui voor algab/lõpeb ---
+// --- Vooruaja märguanne: hüpikaknad loevad sekundeid maha ja arvuti räägib ---
 let roundTimerHandle = null;
 let roundTimerTournamentId = null;
+let closedEndRounds = new Set();
+let closedStartRounds = new Set();
+let currentEndRoundIdx = null;
+let currentStartRoundIdx = null;
 
-function flashScreen(color) {
-  const el = document.getElementById('flashOverlay');
-  el.className = 'flash-overlay flash-' + color;
-  setTimeout(() => {
-    el.className = 'flash-overlay hidden';
-  }, 2000);
-}
+const endPopupEl = document.getElementById('endCountdownPopup');
+const endPopupNumberEl = document.getElementById('endCountdownNumber');
+const startPopupEl = document.getElementById('startCountdownPopup');
+const startPopupNumberEl = document.getElementById('startCountdownNumber');
 
 function speak(text) {
   if (!window.speechSynthesis) return;
@@ -52,41 +81,87 @@ function speak(text) {
   }
 }
 
+function showEndPopup(seconds) {
+  endPopupNumberEl.textContent = seconds;
+  endPopupEl.classList.remove('hidden');
+}
+function hideEndPopup() {
+  endPopupEl.classList.add('hidden');
+  currentEndRoundIdx = null;
+}
+function showStartPopup(seconds) {
+  startPopupNumberEl.textContent = seconds;
+  startPopupEl.classList.remove('hidden');
+}
+function hideStartPopup() {
+  startPopupEl.classList.add('hidden');
+  currentStartRoundIdx = null;
+}
+
+document.getElementById('endCountdownClose').addEventListener('click', () => {
+  if (currentEndRoundIdx != null) closedEndRounds.add(currentEndRoundIdx);
+  hideEndPopup();
+});
+document.getElementById('startCountdownClose').addEventListener('click', () => {
+  if (currentStartRoundIdx != null) closedStartRounds.add(currentStartRoundIdx);
+  hideStartPopup();
+});
+
 function stopRoundTimer() {
   if (roundTimerHandle) clearInterval(roundTimerHandle);
   roundTimerHandle = null;
   roundTimerTournamentId = null;
+  hideEndPopup();
+  hideStartPopup();
 }
 
-// Käivitatakse turniirivaate lõpus. Kui mängu aeg saab läbi: 2 sek punane vilkumine + "START".
-// Kui uus voor peaks algama: 2 sek roheline vilkumine + "STOP". Ei anna tagantjärele märku
-// juba möödunud piiridest (nt kui leht avatakse pooleliolevas turniiris).
+// Käivitatakse turniirivaate lõpus. Viimasel 60 sekundil enne vooru lõppu näidatakse
+// suletavat hüpikakent koos maha loendusega; kui aeg saab läbi, öeldakse "STOP".
+// Viimasel 10 sekundil enne järgmise vooru algust näidatakse teist hüpikakent; kui
+// mäng peaks algama, öeldakse "START". Ei anna tagantjärele märku juba möödunud piiridest.
 function startRoundTimer(t) {
   if (roundTimerTournamentId === t.id) return;
   stopRoundTimer();
   if (t.phase !== 'group' || !t.slots.length || !t.settings.startTime) return;
   roundTimerTournamentId = t.id;
   const windows = roundTimeWindows(t);
-  const now0 = new Date();
-  const fired = new Set();
-  windows.forEach((w, i) => {
-    if (w.start <= now0) fired.add('s' + i);
-    if (w.end <= now0) fired.add('e' + i);
-  });
+  const firedEnd = new Set();
+  const firedStart = new Set();
+  closedEndRounds = new Set();
+  closedStartRounds = new Set();
+
   roundTimerHandle = setInterval(() => {
     const now = new Date();
+
+    let endShown = false;
     windows.forEach((w, i) => {
-      if (now >= w.start && !fired.has('s' + i)) {
-        fired.add('s' + i);
-        flashScreen('green');
+      const msLeft = w.end - now;
+      if (msLeft <= 60000 && msLeft > -3000 && !closedEndRounds.has(i)) {
+        currentEndRoundIdx = i;
+        showEndPopup(Math.max(0, Math.ceil(msLeft / 1000)));
+        endShown = true;
+      }
+      if (msLeft <= 0 && msLeft > -3000 && !firedEnd.has(i)) {
+        firedEnd.add(i);
         speak('STOP');
       }
-      if (now >= w.end && !fired.has('e' + i)) {
-        fired.add('e' + i);
-        flashScreen('red');
+    });
+    if (!endShown) hideEndPopup();
+
+    let startShown = false;
+    windows.forEach((w, i) => {
+      const msLeft = w.start - now;
+      if (msLeft <= 10000 && msLeft > -3000 && !closedStartRounds.has(i)) {
+        currentStartRoundIdx = i;
+        showStartPopup(Math.max(0, Math.ceil(msLeft / 1000)));
+        startShown = true;
+      }
+      if (msLeft <= 0 && msLeft > -3000 && !firedStart.has(i)) {
+        firedStart.add(i);
         speak('START');
       }
     });
+    if (!startShown) hideStartPopup();
   }, 1000);
 }
 
@@ -206,9 +281,19 @@ function roundTimeWindows(t) {
 // ---------------------------------------------------------------------------
 // KODU
 // ---------------------------------------------------------------------------
-function renderHome() {
+async function renderHome() {
   stopLiveSync();
   stopRoundTimer();
+  const user = getCurrentUser();
+  if (user) {
+    appEl.innerHTML = `<div class="card"><p class="muted">Laen sinu turniire…</p></div>`;
+    try {
+      const cloudTournaments = await queryMyTournaments(user.uid);
+      State.cacheTournaments(cloudTournaments);
+    } catch (err) {
+      console.error('Minu turniiride laadimine ebaõnnestus', err);
+    }
+  }
   const tournaments = State.loadAll();
   appEl.innerHTML = `
     <div class="card">
@@ -216,6 +301,11 @@ function renderHome() {
         <h1>Minu turniirid</h1>
         <button class="btn btn-primary" id="newBtn">+ Loo uus turniir</button>
       </div>
+      ${
+        isCloudConfigured() && !user
+          ? `<p class="muted small">💡 Logi ülal paremal sisse, et näha oma turniire ka teisest arvutist või telefonist.</p>`
+          : ''
+      }
       ${
         tournaments.length === 0
           ? `<p class="muted">Ühtegi turniiri pole veel loodud.</p>`
@@ -421,14 +511,36 @@ function renderSettingsScreen(existing) {
       box.innerHTML = `<span class="muted">Täida enne teised väljad</span>`;
       return;
     }
-    const rounds = Schedule.estimateRoundsForFullCoverage(entityCount, courts);
-    const raw = (tournamentMinutes - (rounds - 1) * pauseMinutes) / rounds;
-    const mm = Math.floor(raw);
-    computedMatchMinutes = mm;
-    if (mm < 1) {
-      box.innerHTML = `<span class="error">Turniir on liiga lühike (vajaks ${rounds} vooru) — pikenda turniiri, lisa väljakuid, vähenda pausi või mängijate arvu.</span>`;
+    if (isDoublesFormat(format)) {
+      // Paarismängus on täielik kate kohustuslik: iga paar mängib kõigi ülejäänud paaridega.
+      // Väljakud täidetakse pidevalt (õiglane, kõige vähem mänginud paarid mängivad esimesena) —
+      // "ajaperioodide" arv ei pruugi olla täpselt (paaride arv - 1), aga iga paar jõuab
+      // turniiri lõpuks siiski täpselt niipalju mänge mängida, kui tal on vastaseid.
+      const rounds = Schedule.estimateRoundsForFullCoverage(entityCount, courts);
+      const gamesPerPair = entityCount - 1;
+      const raw = (tournamentMinutes - (rounds - 1) * pauseMinutes) / rounds;
+      const mm = Math.floor(raw);
+      computedMatchMinutes = mm;
+      if (mm < 1) {
+        box.innerHTML = `<span class="error">Turniir on liiga lühike (vajaks ${rounds} ajaperioodi) — pikenda turniiri, lisa väljakuid, vähenda pausi või mängijate arvu.</span>`;
+      } else {
+        box.innerHTML = `<strong>${mm} min</strong> <span class="muted small">(iga paar mängib ${gamesPerPair} vastasega, kokku ${rounds} ajaperioodi)</span>`;
+      }
     } else {
-      box.innerHTML = `<strong>${mm} min</strong> <span class="muted small">(${rounds} vooru, et kõik mängiksid kõigiga)</span>`;
+      // Üksikmängus ei nõuta täielikku katet — mängu pikkus jääb 12-20 min vahemikku,
+      // mänge tehakse võimalikult palju ja hajutatult antud turniiriaja sees.
+      const { matchMinutes: mm, rounds, fullCoverage } = Schedule.pickRelaxedMatchMinutes({
+        tournamentMinutes,
+        pauseMinutes,
+        entityCount,
+        courts,
+      });
+      computedMatchMinutes = mm;
+      if (rounds < 1) {
+        box.innerHTML = `<span class="error">Turniir on liiga lühike — pikenda turniiri, lisa väljakuid või vähenda pausi.</span>`;
+      } else {
+        box.innerHTML = `<strong>${mm} min</strong> <span class="muted small">(${rounds} vooru${fullCoverage ? ', kõik mängivad kõigiga' : ', võimalikult hajutatud'})</span>`;
+      }
     }
   }
 
@@ -649,6 +761,8 @@ function renderPlayersScreen(settings, existing) {
       t.id = existing.id;
       t.createdAt = existing.createdAt;
     }
+    const currentUser = getCurrentUser();
+    t.ownerUid = (existing && existing.ownerUid) || (currentUser && currentUser.uid) || null;
     buildSchedule(t, teamOrderIds);
     t.phase = 'group';
     State.saveTournament(t);
@@ -669,19 +783,16 @@ function buildSchedule(t, teamOrderIds) {
   const groupSlots = Math.max(1, totalSlots - playoffSlots);
   const allPlayerIds = t.players.map((p) => p.id);
 
-  const toSlotObject = (rawMatches, resting) => ({
-    matches: rawMatches.map((m, idx) => ({
+  const toMatches = (rawMatches) =>
+    rawMatches.map((m, idx) => ({
       id: uid(),
       court: idx + 1,
       side1: m.side1,
       side2: m.side2,
       score1: null,
       score2: null,
-    })),
-    resting,
-  });
+    }));
 
-  let entities, entityPlayers;
   if (isDoublesFormat(format)) {
     // Paarilised on fikseeritud kogu turniiri vältel — moodustatakse üks kord siin.
     // teamOrderIds annab järjekorra, milles järjestikused kaksikud (kindel paariline: sisestusjärjekord;
@@ -692,19 +803,22 @@ function buildSchedule(t, teamOrderIds) {
       if (order[i + 1]) teams.push({ id: uid(), playerIds: [order[i], order[i + 1]] });
     }
     t.teams = teams;
-    entities = teams.map((tm) => tm.id);
-    entityPlayers = {};
+    const entityPlayers = {};
     teams.forEach((team) => (entityPlayers[team.id] = team.playerIds));
+    // Väljakud täidetakse pidevalt (õiglaselt, vähim mänginud paarid eesotsas) — erinevad
+    // paarid võivad turniiri jooksul olla erineva arvu mänge mänginud, aga turniiri lõpuks
+    // on kõigil täpselt sama palju mänge (kõigi ülejäänud paaride vastu).
+    const rawSlots = Schedule.generateFairSlots({ entities: teams.map((tm) => tm.id), entityPlayers, courts, maxSlots: groupSlots, mode: 'roundrobin' });
+    t.slots = rawSlots.map((s, idx) => ({ round: idx + 1, matches: toMatches(s.matches), resting: s.resting }));
   } else {
-    entities = allPlayerIds;
-    entityPlayers = {};
+    // Üksikmängus ei nõuta täielikku katet, seega "americano" täidab kogu saadaoleva
+    // aja võimalikult hajutatult; iga slot on siin oma eraldi voor.
+    const entities = allPlayerIds;
+    const entityPlayers = {};
     allPlayerIds.forEach((id) => (entityPlayers[id] = [id]));
+    const rawSlots = Schedule.generateFairSlots({ entities, entityPlayers, courts, maxSlots: groupSlots, mode: 'americano' });
+    t.slots = rawSlots.map((s, idx) => ({ round: idx + 1, matches: toMatches(s.matches), resting: s.resting }));
   }
-
-  // Mängu pikkus on juba arvutatud nii, et täielik "kõik mängivad kõigiga" ring mahuks ära —
-  // seega ajakava tüüpi eraldi valida ei olegi vaja, kasutame alati "roundrobin" režiimi.
-  const rawSlots = Schedule.generateFairSlots({ entities, entityPlayers, courts, maxSlots: groupSlots, mode: 'roundrobin' });
-  t.slots = rawSlots.map((s) => toSlotObject(s.matches, s.resting));
 }
 
 // ---------------------------------------------------------------------------
@@ -715,38 +829,63 @@ function renderTournamentScreen(t, { readOnly }) {
   const standings = isDoubles ? computeTeamStandings(t) : computeStandings(t);
   const roundWindows = roundTimeWindows(t);
 
-  const slotsHtml = t.slots
-    .map(
-      (slot, si) => `
+  // Grupeeri slotid loogilise vooru järgi — paarismängus võib üks voor (kui väljakuid napib)
+  // koosneda mitmest järjestikusest "lainest", mis kuvatakse ühe "Voor N" pealkirja all.
+  const roundGroups = [];
+  t.slots.forEach((slot, si) => {
+    const roundNum = slot.round || si + 1;
+    const lastGroup = roundGroups[roundGroups.length - 1];
+    if (!lastGroup || lastGroup.round !== roundNum) {
+      roundGroups.push({ round: roundNum, items: [] });
+    }
+    roundGroups[roundGroups.length - 1].items.push({ slot, si });
+  });
+
+  const matchTable = (slot, si) => `
+    <table class="table">
+      <thead><tr><th>Väljak</th><th></th><th>Skoor</th><th></th></tr></thead>
+      <tbody>
+        ${slot.matches
+          .map(
+            (m, mi) => `
+          <tr>
+            <td class="court-badge">${m.court}</td>
+            <td class="side">${escapeHtml(sideLabel(t, m.side1))}</td>
+            <td class="score-cell">
+              ${
+                readOnly
+                  ? `<span>${m.score1 ?? '–'} : ${m.score2 ?? '–'}</span>`
+                  : `<input type="number" min="0" class="score-input" data-si="${si}" data-mi="${mi}" data-side="1" value="${m.score1 ?? ''}" />
+                     <span>:</span>
+                     <input type="number" min="0" class="score-input" data-si="${si}" data-mi="${mi}" data-side="2" value="${m.score2 ?? ''}" />`
+              }
+            </td>
+            <td class="side">${escapeHtml(sideLabel(t, m.side2))}</td>
+          </tr>`
+          )
+          .join('')}
+      </tbody>
+    </table>
+    ${slot.resting && slot.resting.length ? `<p class="muted small">Puhkavad: ${slot.resting.map((id) => escapeHtml(nameForPlayer(t, id))).join(', ')}</p>` : ''}`;
+
+  const slotsHtml = roundGroups
+    .map((group) => {
+      const firstSi = group.items[0].si;
+      const lastSi = group.items[group.items.length - 1].si;
+      const multiWave = group.items.length > 1;
+      const wavesHtml = group.items
+        .map(
+          ({ slot, si }, waveIdx) => `
+        ${multiWave ? `<p class="muted small">Osa ${waveIdx + 1}/${group.items.length} · ${fmtTime(roundWindows[si].start)}–${fmtTime(roundWindows[si].end)} (väljakuid napib, voor jaguneb lainetesse)</p>` : ''}
+        ${matchTable(slot, si)}`
+        )
+        .join('');
+      return `
     <div class="round-block">
-      <h3>Voor ${si + 1} <span class="muted">· ${fmtTime(roundWindows[si].start)}–${fmtTime(roundWindows[si].end)}</span></h3>
-      <table class="table">
-        <thead><tr><th>Väljak</th><th></th><th>Skoor</th><th></th></tr></thead>
-        <tbody>
-          ${slot.matches
-            .map(
-              (m, mi) => `
-            <tr>
-              <td class="court-badge">${m.court}</td>
-              <td class="side">${escapeHtml(sideLabel(t, m.side1))}</td>
-              <td class="score-cell">
-                ${
-                  readOnly
-                    ? `<span>${m.score1 ?? '–'} : ${m.score2 ?? '–'}</span>`
-                    : `<input type="number" min="0" class="score-input" data-si="${si}" data-mi="${mi}" data-side="1" value="${m.score1 ?? ''}" />
-                       <span>:</span>
-                       <input type="number" min="0" class="score-input" data-si="${si}" data-mi="${mi}" data-side="2" value="${m.score2 ?? ''}" />`
-                }
-              </td>
-              <td class="side">${escapeHtml(sideLabel(t, m.side2))}</td>
-            </tr>`
-            )
-            .join('')}
-        </tbody>
-      </table>
-      ${slot.resting && slot.resting.length ? `<p class="muted small">Puhkavad: ${slot.resting.map((id) => escapeHtml(nameForPlayer(t, id))).join(', ')}</p>` : ''}
-    </div>`
-    )
+      <h3>Voor ${group.round} <span class="muted">· ${fmtTime(roundWindows[firstSi].start)}–${fmtTime(roundWindows[lastSi].end)}</span></h3>
+      ${wavesHtml}
+    </div>`;
+    })
     .join('');
 
   const standingsHtml = `
@@ -781,7 +920,7 @@ function renderTournamentScreen(t, { readOnly }) {
       <div class="row-between">
         <div>
           <h1>${escapeHtml(t.name)}</h1>
-          <p class="muted small">${formatLabel(t.settings.format)} · ${t.settings.courts} väljakut · ${t.slots.length} vooru · ${t.settings.matchMinutes} min/mäng ${hasPlayoff ? '' : '· Ilma play-off\'ita'}</p>
+          <p class="muted small">${formatLabel(t.settings.format)} · ${t.settings.courts} väljakut · ${roundGroups.length} vooru · ${t.settings.matchMinutes} min/mäng ${hasPlayoff ? '' : '· Ilma play-off\'ita'}</p>
         </div>
         ${readOnly ? '' : `<div class="row-gap"><button class="btn btn-secondary" id="backToSettingsBtn">← Muuda seadistust</button><button class="btn btn-secondary" id="shareBtn">🔗 Jaga link</button>${actionButtons}</div>`}
       </div>
@@ -863,7 +1002,7 @@ function startPlayoffs(t) {
 
 function findMatch(bracket, id) {
   for (const round of bracket.rounds) {
-    const m = round.find((x) => x.id === id);
+    const m = round.matches.find((x) => x.id === id);
     if (m) return m;
   }
   if (bracket.thirdPlace && bracket.thirdPlace.id === id) return bracket.thirdPlace;
@@ -909,33 +1048,58 @@ function renderPlayoffScreen(t, { readOnly }) {
     .map(
       (round, ri) => `
     <div class="bracket-col">
-      <h3>${roundNames(round.length)}</h3>
-      ${round.map(matchCard).join('')}
+      <h3>${roundNames(round.matches.length)}</h3>
+      ${round.matches.map(matchCard).join('')}
     </div>`
     )
     .join('');
 
-  const finalRound = t.bracket.rounds[t.bracket.rounds.length - 1];
+  const finalRound = t.bracket.rounds[t.bracket.rounds.length - 1].matches;
   const championSlot = finalRound.length === 1 && finalRound[0].winnerId != null ? finalRound[0] : null;
   const champion = championSlot ? nameForEntity(t, championSlot.winnerId) : null;
+
+  const isDoubles = isDoublesFormat(t.settings.format);
+  const overallStandings = isDoubles ? computeTeamStandings(t) : computeStandings(t);
+  const overallStandingsHtml = `
+    <table class="table standings-table">
+      <thead><tr><th>#</th><th>${isDoubles ? 'Paar' : 'Mängija'}</th><th>V</th><th>K</th><th>V-K</th><th>Mänge</th></tr></thead>
+      <tbody>
+        ${overallStandings
+          .map(
+            (r, i) => `<tr><td>${i + 1}</td><td>${escapeHtml(r.name)}</td><td>${r.wins}</td><td>${r.losses}</td><td>${r.pointsFor - r.pointsAgainst}</td><td>${r.played}</td></tr>`
+          )
+          .join('')}
+      </tbody>
+    </table>`;
 
   appEl.innerHTML = `
     <div class="card">
       <div class="row-between">
         <h1>${escapeHtml(t.name)} — Play-off</h1>
-        ${readOnly ? '' : `<button class="btn btn-secondary" id="shareBtn2">🔗 Jaga link</button>`}
+        ${
+          readOnly
+            ? ''
+            : `<div class="row-gap"><button class="btn btn-secondary" id="newTournamentBtn2">+ Uus turniir</button><button class="btn btn-secondary" id="shareBtn2">🔗 Jaga link</button></div>`
+        }
       </div>
       ${champion ? `<div class="champion-banner">🏆 Turniiri võitja: <strong>${escapeHtml(champion)}</strong></div>` : ''}
       <div id="shareBox2" class="share-box hidden"></div>
     </div>
-    <div class="card">
-      <div class="bracket">
-        ${roundsHtml}
-        ${
-          t.bracket.thirdPlace
-            ? `<div class="bracket-col"><h3>3. koha mäng</h3>${matchCard(t.bracket.thirdPlace)}</div>`
-            : ''
-        }
+    <div class="two-col">
+      <div class="card">
+        <h2>Play-off tabel</h2>
+        <div class="bracket">
+          ${roundsHtml}
+          ${
+            t.bracket.thirdPlace
+              ? `<div class="bracket-col"><h3>3. koha mäng</h3>${matchCard(t.bracket.thirdPlace)}</div>`
+              : ''
+          }
+        </div>
+      </div>
+      <div class="card">
+        <h2>Üldine pingerida</h2>
+        ${overallStandingsHtml}
       </div>
     </div>
   `;
@@ -955,13 +1119,14 @@ function renderPlayoffScreen(t, { readOnly }) {
           m.winnerId = null;
           m.loserId = null;
         }
-        const finalM = t.bracket.rounds[t.bracket.rounds.length - 1][0];
+        const finalM = t.bracket.rounds[t.bracket.rounds.length - 1].matches[0];
         t.phase = finalM.winnerId != null ? 'done' : 'playoffs';
         State.saveTournament(t);
         renderPlayoffScreen(t, { readOnly: false });
       })
     );
     document.getElementById('shareBtn2').addEventListener('click', () => wireShareBox(t, 'shareBox2'));
+    document.getElementById('newTournamentBtn2').addEventListener('click', () => renderSettingsScreen(null));
   }
   startLiveSync(t, { readOnly });
 }

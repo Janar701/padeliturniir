@@ -5,6 +5,31 @@ function pairKey(x, y) {
   return x < y ? x + '|' + y : y + '|' + x;
 }
 
+// Klassikaline "ring-meetod" — kui väljakuid jagub, et KÕIK saaksid korraga mängida,
+// annab see matemaatiliselt garanteeritud optimaalse tulemuse: täpselt n-1 vooru
+// (paaris arvu puhul), ilma ühegi korduseta, deterministlikult (mitte juhuslikkuse najal).
+function circleMethodRounds(entities) {
+  const arr = [...entities];
+  const bye = arr.length % 2 === 1 ? Symbol('bye') : null;
+  if (bye) arr.push(bye);
+  const n = arr.length;
+  const fixed = arr[0];
+  let rest = arr.slice(1);
+  const rounds = [];
+  for (let r = 0; r < n - 1; r++) {
+    const roundArr = [fixed, ...rest];
+    const pairs = [];
+    for (let i = 0; i < n / 2; i++) {
+      const a = roundArr[i];
+      const b = roundArr[n - 1 - i];
+      if (a !== bye && b !== bye) pairs.push([a, b]);
+    }
+    rounds.push(pairs);
+    rest = [rest[rest.length - 1], ...rest.slice(0, rest.length - 1)];
+  }
+  return rounds;
+}
+
 // Ühtne, õiglane ajakava genereerija — kasutatakse nii üksikmängus (entity = mängija)
 // kui paarismängus (entity = fikseeritud paar; paarilised mängivad alati koos).
 // Igal ajaslotil valitakse mängu need osalejad, kes on seni kõige vähem mänginud
@@ -24,7 +49,36 @@ export function generateFairSlots({ entities, entityPlayers, courts, maxSlots, m
   const totalPossiblePairs = (n * (n - 1)) / 2;
 
   const slots = [];
-  for (let s = 0; s < maxSlots && matchesPerSlot > 0; s++) {
+
+  // Kui väljakute arv ei ole enam kitsaskoht (courts >= maksimaalne võimalik
+  // samaaegsete mängude arv), kasuta deterministlikku ring-meetodit — see väldib
+  // juhusliku otsingu ebaõnne, mis vahel oleks vajanud üleliigse lisavooru,
+  // kuigi täpne kate mahtus n-1 vooru (paaritu n puhul n vooru, tänu ring-meetodi
+  // enda "puhkevooru" loogikale).
+  if (matchesPerSlot === Math.floor(n / 2) && n >= 2) {
+    for (const pairs of circleMethodRounds(entities)) {
+      if (slots.length >= maxSlots) break;
+      if (mode === 'roundrobin' && usedPairs.size >= totalPossiblePairs) break;
+      pairs.forEach(([a, b]) => {
+        const key = pairKey(a, b);
+        usedPairs.add(key);
+        pairCount[key] = (pairCount[key] || 0) + 1;
+        playCount[a] += 1;
+        playCount[b] += 1;
+      });
+      const activeIds = new Set(pairs.flat());
+      const resting = entities.filter((id) => !activeIds.has(id));
+      slots.push({
+        matches: pairs.map(([a, b]) => ({ side1: entityPlayers[a], side2: entityPlayers[b] })),
+        resting: resting.flatMap((id) => entityPlayers[id]),
+      });
+    }
+    if (mode === 'roundrobin' || slots.length >= maxSlots) return slots;
+    // Americano ja aega jäi veel üle: täieliku ringi kõik paarid on juba kasutatud,
+    // seega jätkub allpool olev juhuslik otsing paratamatult mõne kordusega.
+  }
+
+  for (let s = slots.length; s < maxSlots && matchesPerSlot > 0; s++) {
     if (mode === 'roundrobin' && usedPairs.size >= totalPossiblePairs) break;
 
     // Õiglus on kohustuslik, mitte soovituslik: kes on seni kõige vähem mänginud, need MANGIVAD.
@@ -89,6 +143,23 @@ export function estimateRoundsForFullCoverage(entityCount, courts) {
   return slots.length;
 }
 
+// Üksikmängu jaoks: kõik ei pea kõigiga läbi mängima, mängu pikkus jäägu mõistlikku
+// 12-20 min vahemikku ja mänge tehakse võimalikult palju ja hajutatult. Kui täielik kate
+// (kõik mängivad kõigiga) mahub selle vahemiku sees ära, eelistame pikemat, mugavamat mängu —
+// muidu valime lühima lubatud mängu, et voore (ja seega mängijate vahelist hajutatust) tuleks
+// võimalikult palju antud turniiriaja sees.
+export function pickRelaxedMatchMinutes({ tournamentMinutes, pauseMinutes, entityCount, courts }) {
+  const roundsNeeded = estimateRoundsForFullCoverage(entityCount, courts);
+  const achievable = (mm) => Math.floor((tournamentMinutes + pauseMinutes) / (mm + pauseMinutes));
+  for (let mm = 20; mm >= 12; mm--) {
+    const rounds = achievable(mm);
+    if (rounds >= roundsNeeded) return { matchMinutes: mm, rounds, fullCoverage: true };
+  }
+  const matchMinutes = 12;
+  const rounds = achievable(matchMinutes);
+  return { matchMinutes, rounds, fullCoverage: rounds >= roundsNeeded };
+}
+
 // --- Play-off tabel (single elimination) ---
 function seedOrder(k) {
   let order = [1, 2];
@@ -105,6 +176,8 @@ function seedOrder(k) {
 }
 
 // entities: [{id, name}] pingerea järjekorras (parim esimesena). length peab olema 2, 4 või 8.
+// Märkus: Firestore ei luba massiive, mis sisaldavad otse teisi massiive, seega
+// "rounds" hoitakse kujul [{matches:[...]}, ...], mitte otse [[...], ...].
 export function generateBracket(entities) {
   const k = entities.length;
   const order = seedOrder(k);
@@ -114,7 +187,7 @@ export function generateBracket(entities) {
     const e2 = entities[order[i * 2 + 1] - 1];
     round0.push({ id: 'm-r0-' + i, slot1: { entityId: e1.id }, slot2: { entityId: e2.id }, score1: null, score2: null, winnerId: null });
   }
-  const rounds = [round0];
+  const roundsRaw = [round0];
   let prevCount = round0.length;
   let r = 1;
   while (prevCount > 1) {
@@ -122,20 +195,20 @@ export function generateBracket(entities) {
     for (let i = 0; i < prevCount / 2; i++) {
       roundMatches.push({
         id: `m-r${r}-${i}`,
-        slot1: { fromMatch: rounds[r - 1][i * 2].id },
-        slot2: { fromMatch: rounds[r - 1][i * 2 + 1].id },
+        slot1: { fromMatch: roundsRaw[r - 1][i * 2].id },
+        slot2: { fromMatch: roundsRaw[r - 1][i * 2 + 1].id },
         score1: null,
         score2: null,
         winnerId: null,
       });
     }
-    rounds.push(roundMatches);
+    roundsRaw.push(roundMatches);
     prevCount = roundMatches.length;
     r++;
   }
   let thirdPlace = null;
   if (k >= 4) {
-    const semiRound = rounds[rounds.length - 2];
+    const semiRound = roundsRaw[roundsRaw.length - 2];
     thirdPlace = {
       id: 'm-3rd',
       slot1: { fromMatch: semiRound[0].id, loser: true },
@@ -145,5 +218,5 @@ export function generateBracket(entities) {
       winnerId: null,
     };
   }
-  return { rounds, thirdPlace };
+  return { rounds: roundsRaw.map((matches) => ({ matches })), thirdPlace };
 }

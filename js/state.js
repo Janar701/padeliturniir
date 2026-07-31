@@ -42,6 +42,17 @@ export function deleteTournament(id) {
   saveAll(loadAll().filter((t) => t.id !== id));
 }
 
+// Lisab/uuendab kohalikku nimekirja pilvest loetud turniiridega (nt sisselogitud
+// kasutaja "Minu turniirid" päring) — ei kirjuta tagasi pilve, ainult kohalik vahemälu.
+export function cacheTournaments(cloudList) {
+  if (!cloudList || !cloudList.length) return;
+  const existing = loadAll();
+  const byId = {};
+  existing.forEach((t) => (byId[t.id] = t));
+  cloudList.forEach((t) => (byId[t.id] = t));
+  saveAll(Object.values(byId).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)));
+}
+
 export function newTournament(settings, playerInputs) {
   // playerInputs: array of strings (nimed) VÕI {id, name} objektid (kui id-sid on vaja mujal taaskasutada, nt paaride jaoks)
   const players = playerInputs.map((p, i) =>

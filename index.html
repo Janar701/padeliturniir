@@ -13,12 +13,23 @@
     <a href="#" id="homeLink" class="brand">🎾 Padeliturniir</a>
     <span id="viewOnlyBadge" class="badge hidden">Vaid vaatamiseks</span>
     <span id="liveBadge" class="badge badge-live hidden">🔴 Otseülekanne</span>
+    <span id="authArea" class="auth-area"></span>
   </div>
 </header>
 <div id="cloudErrorBanner" class="cloud-error hidden"></div>
 
 <main id="app" class="app"></main>
-<div id="flashOverlay" class="flash-overlay hidden"></div>
+
+<div id="endCountdownPopup" class="countdown-popup countdown-end hidden">
+  <button type="button" class="countdown-close" id="endCountdownClose" aria-label="Sulge">✕</button>
+  <div class="countdown-label">Mäng lõpeb</div>
+  <div class="countdown-number" id="endCountdownNumber">60</div>
+</div>
+<div id="startCountdownPopup" class="countdown-popup countdown-start hidden">
+  <button type="button" class="countdown-close" id="startCountdownClose" aria-label="Sulge">✕</button>
+  <div class="countdown-label">Järgmine mäng algab</div>
+  <div class="countdown-number" id="startCountdownNumber">10</div>
+</div>
 
 <footer class="footer">
   <p>Andmed salvestuvad ainult sinu brauserisse (localStorage). Jagamislink sisaldab hetkeseisu tervikuna.</p>

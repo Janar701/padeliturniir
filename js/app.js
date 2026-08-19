@@ -361,6 +361,13 @@ function capitalize(s) {
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
 }
 
+// Pingerea "Punktid" veerg: tavaliselt kogutud geimipunktid (skooride summa), aga kui
+// seadistuses on valitud punktisüsteem (võit 4p, viik 2p, kaotus 0p), näita hoopis
+// selle süsteemi järgi kogunenud punkte — eraldi loogika ainult selle valiku jaoks.
+function standingsPoints(r, winnerRule) {
+  return winnerRule === 'leaguePoints' ? r.wins * 4 + r.draws * 2 : r.pointsFor;
+}
+
 // ---------------------------------------------------------------------------
 // SEADED (eraldi ekraan)
 // ---------------------------------------------------------------------------
@@ -919,7 +926,7 @@ function renderTournamentScreen(t, { readOnly }) {
       <tbody>
         ${standings
           .map(
-            (r, i) => `<tr><td>${i + 1}</td><td>${escapeHtml(r.name)}</td><td>${r.wins}</td><td>${r.losses}</td><td>${r.draws}</td><td>${r.pointsFor}</td><td>${r.pointsFor - r.pointsAgainst}</td><td>${r.played}</td></tr>`
+            (r, i) => `<tr><td>${i + 1}</td><td>${escapeHtml(r.name)}</td><td>${r.wins}</td><td>${r.losses}</td><td>${r.draws}</td><td>${standingsPoints(r, winnerRule)}</td><td>${r.pointsFor - r.pointsAgainst}</td><td>${r.played}</td></tr>`
           )
           .join('')}
       </tbody>
@@ -1127,7 +1134,7 @@ function renderPlayoffScreen(t, { readOnly }) {
       <tbody>
         ${overallStandings
           .map(
-            (r, i) => `<tr><td>${i + 1}</td><td>${escapeHtml(r.name)}</td><td>${r.wins}</td><td>${r.losses}</td><td>${r.draws}</td><td>${r.pointsFor}</td><td>${r.pointsFor - r.pointsAgainst}</td><td>${r.played}</td></tr>`
+            (r, i) => `<tr><td>${i + 1}</td><td>${escapeHtml(r.name)}</td><td>${r.wins}</td><td>${r.losses}</td><td>${r.draws}</td><td>${standingsPoints(r, winnerRule)}</td><td>${r.pointsFor - r.pointsAgainst}</td><td>${r.played}</td></tr>`
           )
           .join('')}
       </tbody>

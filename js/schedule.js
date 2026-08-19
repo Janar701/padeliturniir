@@ -307,53 +307,52 @@ export function generateAmericanoDoublesSlots({ players, courts, maxSlots }) {
 
   const slots = [];
   for (let s = 0; s < maxSlots; s++) {
-    const sorted = [...players].sort((a, b) => playCount[a] - playCount[b] || Math.random() - 0.5);
+    // TÄHTIS: juhuslikkus tuleb SEGAMISEST enne sorteerimist, mitte sort'i comparator'ist
+    // enda seest (comparator peab andma sama paari jaoks alati sama tulemuse, muidu on
+    // sorteerimise tulemus defineerimata/vigane — just see rikkus varem õigluse: mõned
+    // mängijad said "seni kõige vähem mänginud" hulka valesti, mis tekitaski ebavõrdse
+    // mängude arvu ja tekitas samade vastaste kordumise, kuna aktiivsete mängijate valik
+    // polnud tegelikult õiglane).
+    const sorted = shuffle(players).sort((a, b) => playCount[a] - playCount[b]);
     const boundaryCount = playCount[sorted[capacity - 1]];
     const mandatory = sorted.filter((id) => playCount[id] < boundaryCount);
     const tiedPool = sorted.filter((id) => playCount[id] === boundaryCount);
     const needed = capacity - mandatory.length;
 
-    // 1. samm: moodusta paarilised (2 kaupa) nii, et varasemaid koospaigutusi oleks võimalikult vähe.
-    let bestTeams = null;
-    let bestTeamScore = Infinity;
-    const teamAttempts = Math.max(200, capacity * 20);
-    for (let a = 0; a < teamAttempts; a++) {
+    // Moodusta paarilised JA pane nad üksteise vastu ÜHE koos otsinguga (mitte kahes
+    // eraldi järjestikuses sammus) — kui paarilised valitakse esimesena ilma vastaseid
+    // arvestamata, on hiljem vastaste valikuks jäänud ainult käputäis fikseeritud
+    // kombinatsioone, mis võivad kõik olla juba varem kohtunud. Ühine otsing saab
+    // valida terve vooru korraga nii, et nii paarilised KUI vastased oleks võimalikult
+    // erinevad varasemast.
+    let best = null;
+    let bestScore = Infinity;
+    const attempts = Math.max(600, capacity * 150);
+    for (let a = 0; a < attempts; a++) {
       const flexPicks = shuffle(tiedPool).slice(0, needed);
       const active = shuffle([...mandatory, ...flexPicks]);
       const teams = [];
       for (let g = 0; g < capacity; g += 2) teams.push([active[g], active[g + 1]]);
+      const matches = [];
+      for (let g = 0; g < teams.length; g += 2) matches.push([teams[g], teams[g + 1]]);
+
       let score = 0;
       teams.forEach(([x, y]) => {
-        score += (partnerCount[pairKey(x, y)] || 0) ** 2;
+        score += (partnerCount[pairKey(x, y)] || 0) ** 2 * 3; // korduv paariline on halvem kui korduv vastane
       });
-      if (score < bestTeamScore) {
-        bestTeamScore = score;
-        bestTeams = teams;
-        if (score === 0) break;
-      }
-    }
-
-    // 2. samm: pane moodustatud paarilised üksteise vastu, nii et varasemaid vastasseise
-    // oleks võimalikult vähe.
-    let bestMatches = null;
-    let bestMatchScore = Infinity;
-    const matchAttempts = Math.max(150, matchesPerSlot * 30);
-    for (let a = 0; a < matchAttempts; a++) {
-      const order = shuffle(bestTeams);
-      const matches = [];
-      for (let g = 0; g < order.length; g += 2) matches.push([order[g], order[g + 1]]);
-      let score = 0;
       matches.forEach(([teamA, teamB]) => {
         teamA.forEach((x) => teamB.forEach((y) => {
           score += (opponentCount[pairKey(x, y)] || 0) ** 2;
         }));
       });
-      if (score < bestMatchScore) {
-        bestMatchScore = score;
-        bestMatches = matches;
+
+      if (score < bestScore) {
+        bestScore = score;
+        best = { teams, matches };
         if (score === 0) break;
       }
     }
+    const { teams: bestTeams, matches: bestMatches } = best;
 
     bestTeams.forEach(([x, y]) => {
       partnerCount[pairKey(x, y)] = (partnerCount[pairKey(x, y)] || 0) + 1;

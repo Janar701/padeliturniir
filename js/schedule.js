@@ -283,6 +283,124 @@ export function pickRelaxedMatchMinutes({ tournamentMinutes, pauseMinutes, entit
   return { matchMinutes, rounds, fullCoverage: rounds >= roundsNeeded };
 }
 
+// ---------------------------------------------------------------------------
+// ÜKSIKMÄNG PADELIS ("Americano"): padelit ei saa mängida 1 vastu 1, seega mängitakse
+// alati 2 vs 2, aga paariline ja vastased loositakse iga vooru uuesti — nii saab igaüks
+// võimalikult erinevad paarilised ja vastased kogu turniiri jooksul. See loogika on
+// teadlikult täiesti eraldiseisev paarismängu (fikseeritud paariline) omast.
+// ---------------------------------------------------------------------------
+
+// Ühe vooru jaoks: vali `capacity` mängijat (kes on seni kõige vähem mänginud), moodusta
+// neist paarilised (võimalikult erinevad, kui varem juba koos mängitud) ja seejärel
+// pane paarilised üksteise vastu mängima (võimalikult erinevad vastased, kui varem juba
+// vastamisi mängitud). Sama juhusliku-otsingu-ja-skoori muster, mida kasutab generateFairSlots.
+export function generateAmericanoDoublesSlots({ players, courts, maxSlots }) {
+  const n = players.length;
+  const matchesPerSlot = Math.max(0, Math.min(courts, Math.floor(n / 4)));
+  if (matchesPerSlot === 0 || n < 4) return [];
+  const capacity = matchesPerSlot * 4;
+
+  const playCount = {};
+  players.forEach((id) => (playCount[id] = 0));
+  const partnerCount = {};
+  const opponentCount = {};
+
+  const slots = [];
+  for (let s = 0; s < maxSlots; s++) {
+    const sorted = [...players].sort((a, b) => playCount[a] - playCount[b] || Math.random() - 0.5);
+    const boundaryCount = playCount[sorted[capacity - 1]];
+    const mandatory = sorted.filter((id) => playCount[id] < boundaryCount);
+    const tiedPool = sorted.filter((id) => playCount[id] === boundaryCount);
+    const needed = capacity - mandatory.length;
+
+    // 1. samm: moodusta paarilised (2 kaupa) nii, et varasemaid koospaigutusi oleks võimalikult vähe.
+    let bestTeams = null;
+    let bestTeamScore = Infinity;
+    const teamAttempts = Math.max(200, capacity * 20);
+    for (let a = 0; a < teamAttempts; a++) {
+      const flexPicks = shuffle(tiedPool).slice(0, needed);
+      const active = shuffle([...mandatory, ...flexPicks]);
+      const teams = [];
+      for (let g = 0; g < capacity; g += 2) teams.push([active[g], active[g + 1]]);
+      let score = 0;
+      teams.forEach(([x, y]) => {
+        score += (partnerCount[pairKey(x, y)] || 0) ** 2;
+      });
+      if (score < bestTeamScore) {
+        bestTeamScore = score;
+        bestTeams = teams;
+        if (score === 0) break;
+      }
+    }
+
+    // 2. samm: pane moodustatud paarilised üksteise vastu, nii et varasemaid vastasseise
+    // oleks võimalikult vähe.
+    let bestMatches = null;
+    let bestMatchScore = Infinity;
+    const matchAttempts = Math.max(150, matchesPerSlot * 30);
+    for (let a = 0; a < matchAttempts; a++) {
+      const order = shuffle(bestTeams);
+      const matches = [];
+      for (let g = 0; g < order.length; g += 2) matches.push([order[g], order[g + 1]]);
+      let score = 0;
+      matches.forEach(([teamA, teamB]) => {
+        teamA.forEach((x) => teamB.forEach((y) => {
+          score += (opponentCount[pairKey(x, y)] || 0) ** 2;
+        }));
+      });
+      if (score < bestMatchScore) {
+        bestMatchScore = score;
+        bestMatches = matches;
+        if (score === 0) break;
+      }
+    }
+
+    bestTeams.forEach(([x, y]) => {
+      partnerCount[pairKey(x, y)] = (partnerCount[pairKey(x, y)] || 0) + 1;
+    });
+    bestMatches.forEach(([teamA, teamB]) => {
+      teamA.forEach((x) => teamB.forEach((y) => {
+        opponentCount[pairKey(x, y)] = (opponentCount[pairKey(x, y)] || 0) + 1;
+      }));
+      [...teamA, ...teamB].forEach((id) => (playCount[id] += 1));
+    });
+
+    const activeIds = new Set(bestTeams.flat());
+    const resting = players.filter((id) => !activeIds.has(id));
+    slots.push({
+      matches: bestMatches.map(([teamA, teamB]) => ({ side1: teamA, side2: teamB })),
+      resting,
+    });
+  }
+  return slots;
+}
+
+// Kui palju erinevaid paarilisi-kombinatsioone (mitte "vooru") on olemas kokku ja mitu
+// vooru kuluks, et igaüks saaks (arvutuslikult) vähemalt korra kõigiga paariliseks —
+// kasutatakse ainult mängu pikkuse soovitamiseks, mitte tegeliku ajakava tagamiseks
+// (täielik paariliste kate pole americanos kunagi garanteeritud, ainult eesmärk).
+export function estimateAmericanoPartnerRoundsNeeded(playerCount, courts) {
+  const matchesPerSlot = Math.max(0, Math.min(courts, Math.floor(playerCount / 4)));
+  if (matchesPerSlot === 0 || playerCount < 4) return 0;
+  const totalPartnerPairs = (playerCount * (playerCount - 1)) / 2;
+  const partnerPairsPerRound = matchesPerSlot * 2;
+  return Math.ceil(totalPartnerPairs / partnerPairsPerRound);
+}
+
+// Sama loogika, mis pickRelaxedMatchMinutes, aga americano (2 vs 2, loositavad paarilised)
+// jaoks eraldi, sest "vooru mahutavus" on siin neljakaupa, mitte kahekaupa.
+export function pickAmericanoMatchMinutes({ tournamentMinutes, pauseMinutes, playerCount, courts }) {
+  const roundsNeeded = estimateAmericanoPartnerRoundsNeeded(playerCount, courts);
+  const achievable = (mm) => Math.floor((tournamentMinutes + pauseMinutes) / (mm + pauseMinutes));
+  for (let mm = 20; mm >= 12; mm--) {
+    const rounds = achievable(mm);
+    if (rounds >= roundsNeeded) return { matchMinutes: mm, rounds, fullCoverage: true };
+  }
+  const matchMinutes = 12;
+  const rounds = achievable(matchMinutes);
+  return { matchMinutes, rounds, fullCoverage: rounds >= roundsNeeded };
+}
+
 // --- Play-off tabel (single elimination) ---
 function seedOrder(k) {
   let order = [1, 2];

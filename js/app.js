@@ -243,10 +243,16 @@ function formatLabel(format) {
   return 'Üksikmäng';
 }
 
-// Play-off "üksuseks" on üksikmängus mängija, paarismängus fikseeritud paar.
+// Play-off "üksuseks" on paarismängus fikseeritud paar, üksikmängus (Americano) aga
+// play-off'i jaoks eraldi moodustatud ajutine paar (vt seedAmericanoPlayoffTeams) —
+// mõlemal juhul mängitakse play-off 2 vs 2, sest padelit ei saa mängida üksi.
 function nameForEntity(t, id) {
   if (isDoublesFormat(t.settings.format) && t.teams) {
     const team = t.teams.find((tm) => tm.id === id);
+    if (team) return sideLabel(t, team.playerIds);
+  }
+  if (t.playoffTeams) {
+    const team = t.playoffTeams.find((tm) => tm.id === id);
     if (team) return sideLabel(t, team.playerIds);
   }
   return nameForPlayer(t, id);
@@ -385,7 +391,7 @@ function finalistsOptionsHtml(format, selected) {
 function finalistsHelpText(format) {
   return isDoublesFormat(format)
     ? 'Play-off toimub paaride vahel (paarilised mängivad koos ka finaalis). "Ei mängita" korral kasutatakse kogu turniiri aeg rühmamängudeks.'
-    : 'Play-off toimub üksikmänguna individuaalse pingerea alusel. "Ei mängita" korral kasutatakse kogu turniiri aeg rühmamängudeks.';
+    : 'Play-off mängitakse ka 2 vs 2: pingerea parim pannakse paariliseks viimasega, teine eelviimasega jne (tasavägisemad paarid), ja need paarid mängivad play-off\'i. "Ei mängita" korral kasutatakse kogu turniiri aeg rühmamängudeks.';
 }
 
 function infoIcon(tip) {
@@ -395,7 +401,7 @@ function infoIcon(tip) {
 function formatHelpText(format) {
   if (format === 'doubles_fixed') return 'Sina (või mängijad ise) määrate paarid juba nimekirja sisestades — järgmisel sammul sisestad otse paarid, loosimist ei toimu.';
   if (format === 'doubles_draw') return 'Paarid loositakse: sisestad kaks nimekirja (Veerg 1 ja Veerg 2) ning iga Veeru 1 mängija paaritatakse loositud Veeru 2 mängijaga.';
-  return 'Kõik mängivad üksteise vastu ükshaaval.';
+  return 'Americano: mängitakse alati 2 vs 2 (padelit ei saa üksi mängida), aga paariline ja vastased loositakse iga vooru uuesti, nii et kõik saavad võimalikult erinevad paarilised ja vastased. Vaja vähemalt 4 mängijat.';
 }
 
 function renderSettingsScreen(existing) {
@@ -427,7 +433,7 @@ function renderSettingsScreen(existing) {
       </div>
 
       <div class="field">
-        <label>Formaat ${infoIcon('Üksikmäng: mängijad mängivad üksteise vastu. Paarismäng kindla paarilisega: paarid on juba enne teada. Paarismäng loositava paarilisega: paarid loositakse osalejate seast.')}</label>
+        <label>Formaat ${infoIcon('Üksikmäng (Americano): mängitakse 2 vs 2, aga paariline ja vastased loositakse iga vooru uuesti. Paarismäng kindla paarilisega: paarid on juba enne teada. Paarismäng loositava paarilisega: paarid loositakse osalejate seast.')}</label>
         <div class="radio-group">
           <label><input type="radio" name="f_format" value="singles" ${s.format === 'singles' ? 'checked' : ''}/> Üksikmäng</label>
           <label><input type="radio" name="f_format" value="doubles_fixed" ${s.format === 'doubles_fixed' ? 'checked' : ''}/> Paarismäng — kindel paariline</label>
@@ -541,19 +547,24 @@ function renderSettingsScreen(existing) {
         box.innerHTML = `<strong>${mm} min</strong> <span class="muted small">(iga paar mängib ${gamesPerPair} vastasega, kokku ${rounds} ajaperioodi)</span>`;
       }
     } else {
-      // Üksikmängus ei nõuta täielikku katet — mängu pikkus jääb 12-20 min vahemikku,
-      // mänge tehakse võimalikult palju ja hajutatult antud turniiriaja sees.
-      const { matchMinutes: mm, rounds, fullCoverage } = Schedule.pickRelaxedMatchMinutes({
+      // Üksikmäng = Americano: mängitakse alati 2 vs 2, paarilised ja vastased loositakse
+      // iga vooru uuesti. Mängu pikkus jääb 12-20 min vahemikku, vähemalt 4 mängijat vajalik.
+      if (entityCount < 4) {
+        computedMatchMinutes = 0;
+        box.innerHTML = `<span class="error">Üksikmängus (2 vs 2, paarilised loositakse) on vaja vähemalt 4 mängijat.</span>`;
+        return;
+      }
+      const { matchMinutes: mm, rounds, fullCoverage } = Schedule.pickAmericanoMatchMinutes({
         tournamentMinutes,
         pauseMinutes,
-        entityCount,
+        playerCount: entityCount,
         courts,
       });
       computedMatchMinutes = mm;
       if (rounds < 1) {
         box.innerHTML = `<span class="error">Turniir on liiga lühike — pikenda turniiri, lisa väljakuid või vähenda pausi.</span>`;
       } else {
-        box.innerHTML = `<strong>${mm} min</strong> <span class="muted small">(${rounds} vooru${fullCoverage ? ', kõik mängivad kõigiga' : ', võimalikult hajutatud'})</span>`;
+        box.innerHTML = `<strong>${mm} min</strong> <span class="muted small">(${rounds} vooru, 2 vs 2${fullCoverage ? ', kõik saavad kõigiga vähemalt korra paariliseks' : ', võimalikult erinevate paariliste ja vastastega'})</span>`;
       }
     }
   }
@@ -586,7 +597,7 @@ function renderSettingsScreen(existing) {
       winnerRule: document.querySelector('input[name="f_winnerrule"]:checked').value,
     };
     const errEl = document.getElementById('settingsError');
-    const minNeeded = isDoublesFormat(settings.format) ? 4 : 2;
+    const minNeeded = 4; // Padelit ei saa mängida vähem kui 4 mängijaga (2 vs 2), ei üksik- ega paarismängus.
     if (!settings.tournamentMinutes || settings.tournamentMinutes < 10) {
       errEl.textContent = 'Turniiri pikkus peab olema vähemalt 10 minutit.';
       errEl.classList.remove('hidden');
@@ -826,12 +837,10 @@ function buildSchedule(t, teamOrderIds) {
     const rawSlots = Schedule.generateExactRoundRobin({ entities: teams.map((tm) => tm.id), entityPlayers, courts, maxSlots: groupSlots });
     t.slots = rawSlots.map((s, idx) => ({ round: idx + 1, matches: toMatches(s.matches), resting: s.resting }));
   } else {
-    // Üksikmängus ei nõuta täielikku katet, seega "americano" täidab kogu saadaoleva
-    // aja võimalikult hajutatult; iga slot on siin oma eraldi voor.
-    const entities = allPlayerIds;
-    const entityPlayers = {};
-    allPlayerIds.forEach((id) => (entityPlayers[id] = [id]));
-    const rawSlots = Schedule.generateFairSlots({ entities, entityPlayers, courts, maxSlots: groupSlots, mode: 'americano' });
+    // Üksikmäng = padeli "Americano": padelit ei saa mängida 1 vastu 1, seega mängitakse
+    // ikka 2 vs 2, aga paariline ja vastased loositakse iga vooru uuesti (eraldi loogika
+    // paarismängust — vt generateAmericanoDoublesSlots).
+    const rawSlots = Schedule.generateAmericanoDoublesSlots({ players: allPlayerIds, courts, maxSlots: groupSlots });
     t.slots = rawSlots.map((s, idx) => ({ round: idx + 1, matches: toMatches(s.matches), resting: s.resting }));
   }
 }
@@ -1017,12 +1026,35 @@ function renderTournamentScreen(t, { readOnly }) {
 // ---------------------------------------------------------------------------
 // PLAY-OFF
 // ---------------------------------------------------------------------------
+// Üksikmängu (Americano) play-off jaoks: pingerea parim + halvim finalist mängivad koos
+// paaris, teine + eelviimane jne — nii tulevad play-off'i paarid võimalikult tasavägised.
+// Eraldi loogika paarismängust, kus paarilised on juba kogu turniiri vältel fikseeritud.
+function seedAmericanoPlayoffTeams(finalistRows) {
+  const k = finalistRows.length;
+  const teams = [];
+  for (let i = 0; i < k / 2; i++) {
+    const a = finalistRows[i];
+    const b = finalistRows[k - 1 - i];
+    teams.push({ id: uid(), playerIds: [a.id, b.id] });
+  }
+  return teams;
+}
+
 function startPlayoffs(t) {
   const isDoubles = isDoublesFormat(t.settings.format);
   const winnerRule = t.settings.winnerRule || 'wins';
   const standings = isDoubles ? computeTeamStandings(t, winnerRule) : computeStandings(t, winnerRule);
-  const finalists = standings.slice(0, t.settings.finalists).map((r) => ({ id: r.id, name: r.name }));
-  t.bracket = Schedule.generateBracket(finalists);
+  if (isDoubles) {
+    const finalists = standings.slice(0, t.settings.finalists).map((r) => ({ id: r.id, name: r.name }));
+    t.playoffTeams = null;
+    t.bracket = Schedule.generateBracket(finalists);
+  } else {
+    // Padelit ei saa mängida üksi, seega moodustame play-off'i jaoks ajutised paarid.
+    const finalistRows = standings.slice(0, t.settings.finalists);
+    const playoffTeams = seedAmericanoPlayoffTeams(finalistRows);
+    t.playoffTeams = playoffTeams;
+    t.bracket = Schedule.generateBracket(playoffTeams.map((tm) => ({ id: tm.id, name: sideLabel(t, tm.playerIds) })));
+  }
   t.phase = 'playoffs';
   State.saveTournament(t);
   renderPlayoffScreen(t, { readOnly: false });

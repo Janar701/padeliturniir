@@ -151,7 +151,7 @@ export function generateExactRoundRobin({ entities, entityPlayers, courts, maxSl
 //
 // mode 'roundrobin': peatub, kui iga paar üksusi on juba korra kohtunud (täielik ring läbitud).
 // mode 'americano': täidab kogu saadaoleva aja, eelistades ikka värskeid vastasseise.
-export function generateFairSlots({ entities, entityPlayers, courts, maxSlots, mode }) {
+export function generateFairSlots({ entities, entityPlayers, courts, maxSlots, mode, lastRoundCapacity }) {
   const n = entities.length;
   const matchesPerSlot = Math.max(0, Math.min(courts, Math.floor(n / 2)));
   const capacity = matchesPerSlot * 2;
@@ -194,14 +194,23 @@ export function generateFairSlots({ entities, entityPlayers, courts, maxSlots, m
   for (let s = slots.length; s < maxSlots && matchesPerSlot > 0; s++) {
     if (mode === 'roundrobin' && usedPairs.size >= totalPossiblePairs) break;
 
+    // Kõik voorud kasutavad täisvõimsust, VÄLJA ARVATUD kõige viimane voor, kui
+    // täpse võrdsuse tagamiseks on vaja, et see kasutaks vähem väljakuid (vt
+    // resolveExactRoundPlan) — väljak ei jää kunagi tühjaks keset turniiri.
+    const roundCapacity = s === maxSlots - 1 && lastRoundCapacity != null ? lastRoundCapacity : capacity;
+    const roundMatchesPerSlot = Math.floor(roundCapacity / 2);
+    if (roundCapacity <= 0) continue;
+
     // Õiglus on kohustuslik, mitte soovituslik: kes on seni kõige vähem mänginud, need MANGIVAD.
     // Vabadus vastasseisu valikul (korduste vältimiseks) jääb ainult võrdse mängude arvuga
     // ("piiripealse") grupi sees — nii ei saa värskuse eelistamine kunagi õiglust rikkuda.
-    const sorted = [...entities].sort((a, b) => playCount[a] - playCount[b] || Math.random() - 0.5);
-    const boundaryCount = playCount[sorted[capacity - 1]];
+    // TÄHTIS: juhuslikkus tuleb SEGAMISEST enne sorteerimist, mitte sort'i comparator'ist
+    // enda seest (vt generateAmericanoDoublesSlots kommentaari samal teemal).
+    const sorted = shuffle(entities).sort((a, b) => playCount[a] - playCount[b]);
+    const boundaryCount = playCount[sorted[roundCapacity - 1]];
     const mandatory = sorted.filter((id) => playCount[id] < boundaryCount);
     const tiedPool = sorted.filter((id) => playCount[id] === boundaryCount);
-    const needed = capacity - mandatory.length;
+    const needed = roundCapacity - mandatory.length;
 
     let best = null;
     let bestScore = Infinity;
@@ -210,7 +219,7 @@ export function generateFairSlots({ entities, entityPlayers, courts, maxSlots, m
       const flexPicks = shuffle(tiedPool).slice(0, needed);
       const active = shuffle([...mandatory, ...flexPicks]);
       const pairs = [];
-      for (let g = 0; g < matchesPerSlot; g++) pairs.push([active[g * 2], active[g * 2 + 1]]);
+      for (let g = 0; g < roundMatchesPerSlot; g++) pairs.push([active[g * 2], active[g * 2 + 1]]);
       let score = 0;
       pairs.forEach(([a, b]) => {
         score += (pairCount[pairKey(a, b)] || 0) ** 2;
@@ -266,6 +275,32 @@ export function estimateExactRoundRobinSlots(entityCount, courts) {
   return generateExactRoundRobin({ entities, entityPlayers, courts }).length;
 }
 
+// Arvutab KÕIK kehtivad (täpset võrdsust tagavad) mänguaja-valikud antud mm vahemikus —
+// jagatud abifunktsioon, mida kasutavad nii "vali automaatselt parim" (pickRelaxedMatchMinutes/
+// pickAmericanoMatchMinutes) kui "näita kuni 5 valikut" (listRelaxedMatchOptions/
+// listAmericanoMatchOptions) funktsioonid. Iga voorude arvu kohta jäetakse ainult parim
+// (vähim lühendamine, siis rohkem ärakasutatud aega) mänguaeg — muidu näeks kasutaja mitut
+// peaaegu identset valikut sama voorude arvuga.
+function computeMatchOptions({ n, unitSize, courts, tournamentMinutes, pauseMinutes, mmMin, mmMax }) {
+  const byRounds = new Map();
+  for (let mm = mmMin; mm <= mmMax; mm++) {
+    const plan = resolveExactRoundPlan({ n, unitSize, courts, tournamentMinutes, pauseMinutes, baseMatchMinutes: mm });
+    if (!plan.exact || plan.rounds < 1) continue;
+    const timeUsed = plan.rounds * mm - plan.shortenedCount + Math.max(0, plan.rounds - 1) * pauseMinutes;
+    const candidate = { matchMinutes: mm, rounds: plan.rounds, lastRoundCapacity: plan.lastRoundCapacity, shortenedCount: plan.shortenedCount, timeUsed };
+    const existing = byRounds.get(plan.rounds);
+    if (
+      !existing ||
+      candidate.shortenedCount < existing.shortenedCount ||
+      (candidate.shortenedCount === existing.shortenedCount && candidate.timeUsed > existing.timeUsed)
+    ) {
+      byRounds.set(plan.rounds, candidate);
+    }
+  }
+  // Rohkem vooru enne (rohkem varieeruvust) — sama järjestus, mida äpp muidu automaatselt eelistab.
+  return [...byRounds.values()].sort((a, b) => b.rounds - a.rounds);
+}
+
 // Üksikmängu jaoks: kõik ei pea kõigiga läbi mängima, mängu pikkus jäägu mõistlikku
 // 12-20 min vahemikku ja mänge tehakse võimalikult palju ja hajutatult. Kui täielik kate
 // (kõik mängivad kõigiga) mahub selle vahemiku sees ära, eelistame pikemat, mugavamat mängu —
@@ -273,14 +308,127 @@ export function estimateExactRoundRobinSlots(entityCount, courts) {
 // võimalikult palju antud turniiriaja sees.
 export function pickRelaxedMatchMinutes({ tournamentMinutes, pauseMinutes, entityCount, courts }) {
   const roundsNeeded = estimateRoundsForFullCoverage(entityCount, courts);
-  const achievable = (mm) => Math.floor((tournamentMinutes + pauseMinutes) / (mm + pauseMinutes));
-  for (let mm = 20; mm >= 12; mm--) {
-    const rounds = achievable(mm);
-    if (rounds >= roundsNeeded) return { matchMinutes: mm, rounds, fullCoverage: true };
+  // Alustatakse 11-st (mitte 12-st), sest see on paarismängus juba niigi kehtiv
+  // absoluutne alampiir (vt recomputeMatchLength) — parem kasutada seda otse ühtlase
+  // mänguajana, kui panna enamik voore "1 minut lühemaks" 12-minutilisest baasist,
+  // mis annaks sama tulemuse, aga näeks välja nagu erand, kuigi seda pole.
+  const options = computeMatchOptions({ n: entityCount, unitSize: 2, courts, tournamentMinutes, pauseMinutes, mmMin: 11, mmMax: 20 });
+  const best = options[0] || null;
+  if (!best) return { matchMinutes: 12, rounds: 0, lastRoundCapacity: 0, shortenedCount: 0, fullCoverage: false };
+  return {
+    matchMinutes: best.matchMinutes,
+    rounds: best.rounds,
+    lastRoundCapacity: best.lastRoundCapacity,
+    shortenedCount: best.shortenedCount,
+    fullCoverage: best.rounds >= roundsNeeded,
+  };
+}
+
+// Sama, aga tagastab KUNI 5 kehtivat valikut (mitte ainult ühte "parimat"), et kasutaja
+// saaks ise valida mänguaja/voorude-arvu kombinatsiooni vahel seadete ekraanil.
+export function listRelaxedMatchOptions({ tournamentMinutes, pauseMinutes, entityCount, courts }) {
+  const options = computeMatchOptions({ n: entityCount, unitSize: 2, courts, tournamentMinutes, pauseMinutes, mmMin: 11, mmMax: 20 });
+  return options.slice(0, 5);
+}
+
+function gcd(a, b) {
+  return b === 0 ? a : gcd(b, a % b);
+}
+
+// ---------------------------------------------------------------------------
+// ÜHINE "kui palju vooru, kas viimane voor peab olema väiksema väljakute arvuga
+// ja/või mõni voor 1 minut lühem" otsustaja. TÄPNE võrdsus on kohustuslik —
+// exact:false EI OLE KUNAGI vastuvõetav lõpptulemus, kutsuja peab sel juhul
+// näitama viga (mitte kunagi genereerima ebavõrdset ajakava vaikimisi).
+//
+// Kaks tööriista, proovitakse selles järjekorras (lihtsam enne):
+// 1) Viimane voor võib kasutada vähem väljakuid kui kõik teised (VÄLJAK EI JÄÄ
+//    KUNAGI TÜHJAKS KESKEL, ainult kõige viimases voorus, kui vaja) — see ei
+//    puuduta mänguaega üldse.
+// 2) Kui tööriist 1 ei aita, tehakse (laiali jaotatult, mitte lõppu kuhjatult)
+//    mõni voor 1 minut lühem — kõik voorud kasutavad siis kõiki väljakuid.
+//
+// unitSize: mitu "kohta" üks ajaperiood ühe entity kohta nõuab (paarismängus 2, sest
+// paar ise on juba pool mängust; americanos 4, sest 2 paari moodustatakse mängijatest).
+// ---------------------------------------------------------------------------
+export function resolveExactRoundPlan({ n, unitSize, courts, tournamentMinutes, pauseMinutes, baseMatchMinutes }) {
+  const matchesPerSlot = Math.max(0, Math.min(courts, Math.floor(n / unitSize)));
+  const capacity = matchesPerSlot * unitSize;
+  if (capacity === 0 || n < unitSize || baseMatchMinutes < 1) {
+    return { rounds: 0, lastRoundCapacity: 0, shortenedCount: 0, exact: false };
   }
-  const matchMinutes = 12;
-  const rounds = achievable(matchMinutes);
-  return { matchMinutes, rounds, fullCoverage: rounds >= roundsNeeded };
+
+  const timeFor = (rounds, mmSum) => mmSum + Math.max(0, rounds - 1) * pauseMinutes;
+  let rTight = 0;
+  while (timeFor(rTight + 1, (rTight + 1) * baseMatchMinutes) <= tournamentMinutes) rTight++;
+
+  if (capacity === n) {
+    // Kõik mängivad iga voor niikuinii — võrdsus on iseenesest tagatud.
+    return { rounds: rTight, lastRoundCapacity: capacity, shortenedCount: 0, exact: true };
+  }
+
+  // 1. tööriist: kas rTight vooru (kõik täispikkusega) juures leidub viimasele voorule
+  // väljakute-arv, millega kogusumma jagub täpselt? Ei mõjuta mänguaega üldse. lastCap=0
+  // tähendaks, et "viimane voor" oleks täiesti tühi — see pole päris voor, seega
+  // loetakse see hoopis (rTight-1) täisvõimsusel vooruks (fantoomvooru ei näidata).
+  if (rTight >= 1) {
+    for (let lastCap = capacity; lastCap > 0; lastCap -= unitSize) {
+      const total = (rTight - 1) * capacity + lastCap;
+      if (total % n === 0) {
+        return { rounds: rTight, lastRoundCapacity: lastCap, shortenedCount: 0, exact: true };
+      }
+    }
+    if (rTight - 1 >= 1 && (rTight - 1) * capacity % n === 0) {
+      return { rounds: rTight - 1, lastRoundCapacity: capacity, shortenedCount: 0, exact: true };
+    }
+  }
+
+  // 2. tööriist: mõni voor 1 minut lühem (kõik väljakud ikka iga voor täis).
+  const shortMm = Math.max(1, baseMatchMinutes - 1);
+  let rLoose = 0;
+  while (timeFor(rLoose + 1, (rLoose + 1) * shortMm) <= tournamentMinutes) rLoose++;
+
+  const period = n / gcd(n, capacity);
+  if (period < 1 || period > rLoose) {
+    // Isegi kõige lühema lubatud mänguajaga (tööriist 2) ega väiksema viimase vooruga
+    // (tööriist 1) ei mahu vajalik voorude arv antud turniiriaja sisse — täpset
+    // võrdsust EI SAA saavutada. Kutsuja peab siin näitama viga.
+    return { rounds: 0, lastRoundCapacity: 0, shortenedCount: 0, exact: false };
+  }
+  // Suurim perioodi täiskordne, mis rLoose sisse mahub (rohkem vooru eelistatud) —
+  // kuna R <= rLoose, on lühendamisega mahtumine matemaatiliselt garanteeritud.
+  const R = Math.floor(rLoose / period) * period;
+  const fullTime = timeFor(R, R * baseMatchMinutes);
+  const shortenedCount = Math.max(0, fullTime - tournamentMinutes);
+  return { rounds: R, lastRoundCapacity: capacity, shortenedCount, exact: true };
+}
+
+// Sama "tööriist 1" (viimane voor väiksema väljakute arvuga), aga FIKSEERITUD
+// voorude arvu jaoks (mitte turniiriajast tuletatuna) — kasutatakse siis, kui
+// play-off on juba voorude arvust osa ära võtnud ja "viimane voor" on nihkunud.
+// Tagastab lastRoundCapacity või null, kui täpset lahendust ei leitud (langetakse
+// tagasi täisvõimsusele, loomuliku ülimalt 1 mängu vahega).
+export function findLastRoundCapacityForRounds(n, unitSize, courts, rounds) {
+  const matchesPerSlot = Math.max(0, Math.min(courts, Math.floor(n / unitSize)));
+  const capacity = matchesPerSlot * unitSize;
+  if (capacity === 0 || rounds < 1 || capacity === n) return null;
+  for (let lastCap = capacity; lastCap >= 0; lastCap -= unitSize) {
+    const total = (rounds - 1) * capacity + lastCap;
+    if (total % n === 0) return lastCap;
+  }
+  return null;
+}
+
+// Jaotab `shortenedCount` "1 minut lühema" vooru laiali üle kogu `rounds` voору
+// (mitte lõppu kuhjatult) — tagastab Set'i 0-indekseeritud vooru-numbritega.
+export function distributeShortenedRounds(rounds, shortenedCount) {
+  const set = new Set();
+  if (shortenedCount <= 0 || rounds <= 0) return set;
+  const k = Math.min(shortenedCount, rounds);
+  for (let i = 0; i < k; i++) {
+    set.add(Math.floor(((i + 0.5) * rounds) / k));
+  }
+  return set;
 }
 
 // ---------------------------------------------------------------------------
@@ -294,11 +442,208 @@ export function pickRelaxedMatchMinutes({ tournamentMinutes, pauseMinutes, entit
 // neist paarilised (võimalikult erinevad, kui varem juba koos mängitud) ja seejärel
 // pane paarilised üksteise vastu mängima (võimalikult erinevad vastased, kui varem juba
 // vastamisi mängitud). Sama juhusliku-otsingu-ja-skoori muster, mida kasutab generateFairSlots.
-export function generateAmericanoDoublesSlots({ players, courts, maxSlots }) {
+export function generateAmericanoDoublesSlots({ players, courts, maxSlots, lastRoundCapacity }) {
   const n = players.length;
   const matchesPerSlot = Math.max(0, Math.min(courts, Math.floor(n / 4)));
   if (matchesPerSlot === 0 || n < 4) return [];
-  const capacity = matchesPerSlot * 4;
+
+  // Ühe vooru "ahne" valik (madalaim skoor) ei näe tervet turniiri ette — see üksi ei
+  // taga, et "mängija X mängib mängija Y-ga uuesti, kuigi Z-ga pole veel kordagi
+  // mängitud" ei juhtuks. Seepärast genereeritakse esmalt KOGU ajakava, ja SEEJÄREL
+  // parandatakse tervet ajakava korraga (vahetatakse mängijate kohti eri voorude
+  // vahel, mitte ainult ühe vooru sees) — vt repairScheduleGlobally. Kuna mängude
+  // koguarv jääb kohavahetusel muutumatuks (mängija lihtsalt mängib teises voorus
+  // sama palju), ei riku see kunagi juba tagatud võrdset mängude arvu. Mõne
+  // (eriti lühikese) turniiri puhul jääb puhas "ainult parem" otsing mõnikord
+  // kohalikku miinimumi kinni — seepärast proovitakse paar korda uuesti ja jäetakse
+  // parim (samamoodi nagu iga üksiku vooru sees juba tehakse).
+  const outerAttempts = n <= 14 ? 3 : n <= 22 ? 2 : 1;
+  let best = null;
+  let bestBadness = Infinity;
+  for (let oa = 0; oa < outerAttempts; oa++) {
+    const candidate = attemptFullSchedule(players, courts, maxSlots, lastRoundCapacity);
+    repairScheduleGlobally(candidate, n);
+    const badness = scheduleBadness(candidate, n);
+    if (badness < bestBadness) {
+      bestBadness = badness;
+      best = candidate;
+      if (badness === 0) break; // parem ei saagi
+    }
+  }
+  return best;
+}
+
+// Loeb kokku, kui "halb" ajakava on — iga mängija puuduolevate vastaste arv ruudus
+// (nii et "üks mängija kellel palju puudu" on hullem kui "mitu mängijat kellel üks
+// puudu") — kasutatakse mitme täieliku katse hulgast parima valimiseks.
+function scheduleBadness(slots, n) {
+  const oppFaced = {};
+  slots.forEach((slot) =>
+    slot.matches.forEach((m) => {
+      [...m.side1, ...m.side2].forEach((x) => {
+        if (!oppFaced[x]) oppFaced[x] = new Set();
+      });
+      m.side1.forEach((x) => m.side2.forEach((y) => {
+        oppFaced[x].add(y);
+        oppFaced[y].add(x);
+      }));
+    })
+  );
+  let total = 0;
+  Object.keys(oppFaced).forEach((p) => {
+    const missing = n - 1 - oppFaced[p].size;
+    total += missing * missing;
+  });
+  return total;
+}
+
+// Parandab KOGU ajakava korraga: vahetab juhuslikult kahe mängija "kohti" (kes mängib
+// millises voorus, kellega paaris ja kelle vastu) — ka eri voorude vahel, mitte ainult
+// ühe vooru sees. See annab palju rohkem vabadust kui ühe vooru siseselt otsimine, sest
+// kohavahetus ei muuda kummagi mängija KOGU mängude arvu (mõlemad mängivad ikka sama
+// palju, lihtsalt osalt erinevates voorudes) — seega ei saa see kunagi rikkuda juba
+// tagatud võrdset mängude arvu. Aktsepteeritakse ainult vahetusi, mis ei tee asja
+// halvemaks (korduvate paariliste/vastaste koguskoori mõttes).
+function repairScheduleGlobally(slots, n) {
+  const roundArrays = slots.map((slot) => slot.matches.flatMap((m) => [...m.side1, ...m.side2]));
+  const numRounds = roundArrays.length;
+  if (numRounds < 2) return;
+
+  const partnerCount = {};
+  const opponentCount = {};
+  const roundPairs = (arr) => {
+    const partners = [];
+    for (let g = 0; g < arr.length; g += 2) partners.push([arr[g], arr[g + 1]]);
+    const opponents = [];
+    for (let g = 0; g < arr.length; g += 4) {
+      const teamA = [arr[g], arr[g + 1]];
+      const teamB = [arr[g + 2], arr[g + 3]];
+      teamA.forEach((x) => teamB.forEach((y) => opponents.push([x, y])));
+    }
+    return { partners, opponents };
+  };
+  const roundScore = (arr) => {
+    const { partners, opponents } = roundPairs(arr);
+    let s = 0;
+    partners.forEach(([x, y]) => { s += (partnerCount[pairKey(x, y)] || 0) ** 2 * 3; });
+    opponents.forEach(([x, y]) => { s += (opponentCount[pairKey(x, y)] || 0) ** 2; });
+    return s;
+  };
+  const applyCounts = (arr, delta) => {
+    const { partners, opponents } = roundPairs(arr);
+    partners.forEach(([x, y]) => { const k = pairKey(x, y); partnerCount[k] = (partnerCount[k] || 0) + delta; });
+    opponents.forEach(([x, y]) => { const k = pairKey(x, y); opponentCount[k] = (opponentCount[k] || 0) + delta; });
+  };
+  roundArrays.forEach((arr) => applyCounts(arr, 1));
+
+  const globalBadness = () => {
+    const oppFaced = {};
+    roundArrays.forEach((arr) => {
+      const { opponents } = roundPairs(arr);
+      opponents.forEach(([x, y]) => {
+        if (!oppFaced[x]) oppFaced[x] = new Set();
+        if (!oppFaced[y]) oppFaced[y] = new Set();
+        oppFaced[x].add(y);
+        oppFaced[y].add(x);
+      });
+    });
+    let total = 0;
+    Object.keys(oppFaced).forEach((p) => {
+      const missing = n - 1 - oppFaced[p].size;
+      total += missing * missing;
+    });
+    return total;
+  };
+  let bestSnapshot = roundArrays.map((arr) => [...arr]);
+  let bestBadness = globalBadness();
+
+  // Puhas "aktsepteeri ainult parem" otsing jääb vahel kohalikku miinimumi kinni
+  // (mõni vahetus üksi ei paranda asja, kuigi mitu vahetust koos paranduks) — nn
+  // "simulated annealing": alguses aktsepteeritakse vahel ka veidi halvemaid
+  // vahetusi (mis aitab kohalikust miinimumist välja pääseda), lõpu poole aina
+  // vähem. Kuna vahepeal võib otsing ajutiselt halveneda, jäetakse meelde KÕIGI
+  // aegade parim leitud seis (mitte lihtsalt see, millega otsing lõpeb).
+  const iterations = Math.min(600000, Math.max(50000, n * n * 1000));
+  const checkEvery = Math.max(500, Math.floor(iterations / 100));
+  for (let it = 0; it < iterations; it++) {
+    const temperature = 3 * (1 - it / iterations);
+    const ri = Math.floor(Math.random() * numRounds);
+    const rj = Math.floor(Math.random() * numRounds);
+    const arrI = roundArrays[ri];
+    const arrJ = roundArrays[rj];
+    if (!arrI.length || !arrJ.length) continue;
+    const pi = Math.floor(Math.random() * arrI.length);
+    const pj = Math.floor(Math.random() * arrJ.length);
+    if (ri === rj && pi === pj) continue;
+    const A = arrI[pi];
+    const B = arrJ[pj];
+    if (ri === rj) {
+      if (A === B) continue;
+      const before = roundScore(arrI);
+      applyCounts(arrI, -1);
+      [arrI[pi], arrI[pj]] = [arrI[pj], arrI[pi]];
+      applyCounts(arrI, 1);
+      const after = roundScore(arrI);
+      const accept = after <= before || Math.random() < Math.exp(-(after - before) / Math.max(0.01, temperature));
+      if (!accept) {
+        applyCounts(arrI, -1);
+        [arrI[pi], arrI[pj]] = [arrI[pj], arrI[pi]];
+        applyCounts(arrI, 1);
+      }
+    } else {
+      if (arrI.includes(B) || arrJ.includes(A)) continue; // sama mängija ei tohi ühes voorus kaks korda olla
+      const before = roundScore(arrI) + roundScore(arrJ);
+      applyCounts(arrI, -1);
+      applyCounts(arrJ, -1);
+      arrI[pi] = B;
+      arrJ[pj] = A;
+      applyCounts(arrI, 1);
+      applyCounts(arrJ, 1);
+      const after = roundScore(arrI) + roundScore(arrJ);
+      const accept = after <= before || Math.random() < Math.exp(-(after - before) / Math.max(0.01, temperature));
+      if (!accept) {
+        applyCounts(arrI, -1);
+        applyCounts(arrJ, -1);
+        arrI[pi] = A;
+        arrJ[pj] = B;
+        applyCounts(arrI, 1);
+        applyCounts(arrJ, 1);
+      }
+    }
+    if (it % checkEvery === 0) {
+      const badness = globalBadness();
+      if (badness < bestBadness) {
+        bestBadness = badness;
+        bestSnapshot = roundArrays.map((arr) => [...arr]);
+        if (badness === 0) break; // kõik on juba kõigiga kohtunud — parem ei saagi
+      }
+    }
+  }
+  if (globalBadness() > bestBadness) {
+    bestSnapshot.forEach((arr, i) => { roundArrays[i] = arr; });
+  }
+
+  // Kirjuta parandatud kohad tagasi slots struktuuri (samad väljakud, uued kokkupanekud).
+  slots.forEach((slot, si) => {
+    const arr = roundArrays[si];
+    const matchesPerSlotHere = slot.matches.length;
+    for (let mi = 0; mi < matchesPerSlotHere; mi++) {
+      slot.matches[mi].side1 = [arr[mi * 4], arr[mi * 4 + 1]];
+      slot.matches[mi].side2 = [arr[mi * 4 + 2], arr[mi * 4 + 3]];
+    }
+  });
+}
+
+// Ajakava genereerimine ise EI pea enam voorude arvu ega väljakute kasutust kohandama —
+// väljakud on IGA voor täisvõimsusel (kunagi ei jää tühjaks), sest õige voorude arv
+// (mis tagab võrdsuse) otsustatakse juba ette resolveExactRoundPlan abil (vt
+// pickAmericanoMatchMinutes). Kuna kutsuja garanteerib maxSlots*täisvõimsus % n === 0
+// alati kui vähegi võimalik, tagab allolev "kes on seni kõige vähem mänginud" valik
+// ise täpse võrdsuse — ilma väljakute vähendamiseta.
+function attemptFullSchedule(players, courts, maxSlots, lastRoundCapacity) {
+  const n = players.length;
+  const matchesPerSlot = Math.max(0, Math.min(courts, Math.floor(n / 4)));
+  const fullCapacity = matchesPerSlot * 4;
 
   const playCount = {};
   players.forEach((id) => (playCount[id] = 0));
@@ -307,6 +652,9 @@ export function generateAmericanoDoublesSlots({ players, courts, maxSlots }) {
 
   const slots = [];
   for (let s = 0; s < maxSlots; s++) {
+    const capacity = s === maxSlots - 1 && lastRoundCapacity != null ? lastRoundCapacity : fullCapacity;
+    if (capacity <= 0) continue; // viimane voor jääb täielikult ära (napi väljakute arvu korral)
+
     // TÄHTIS: juhuslikkus tuleb SEGAMISEST enne sorteerimist, mitte sort'i comparator'ist
     // enda seest (comparator peab andma sama paari jaoks alati sama tulemuse, muidu on
     // sorteerimise tulemus defineerimata/vigane — just see rikkus varem õigluse: mõned
@@ -388,16 +736,34 @@ export function estimateAmericanoPartnerRoundsNeeded(playerCount, courts) {
 
 // Sama loogika, mis pickRelaxedMatchMinutes, aga americano (2 vs 2, loositavad paarilised)
 // jaoks eraldi, sest "vooru mahutavus" on siin neljakaupa, mitte kahekaupa.
+//
+// ROHKEM VOORE ON TÄHTSAM KUI PIKEM MÄNG: rohkem voore tähendab rohkem erinevaid
+// paarilisi ja vastaseid, mis on mängijatele olulisem kui mugavam, aga vähem
+// varieeruvusega pikem mäng. Seepärast proovitakse KÕIKI mänguaegu 12-20 min
+// vahemikus ja valitakse see, mis annab kõige ROHKEM päriselt mängitud voore
+// (vt resolveExactRoundPlan, kus võrdsuse tagamiseks võib mõni voor olla 1 minut
+// lühem — väljak ei jää kunagi tühjaks) — see toob praktikas peaaegu alati 12-14 min
+// mängu, sest lühem mäng mahutab rohkem voore. "fullCoverage" (kas kõik jõuavad
+// kõigiga paariliseks) on siin ainult INFO kuvamiseks, mitte peatumistingimus.
 export function pickAmericanoMatchMinutes({ tournamentMinutes, pauseMinutes, playerCount, courts }) {
   const roundsNeeded = estimateAmericanoPartnerRoundsNeeded(playerCount, courts);
-  const achievable = (mm) => Math.floor((tournamentMinutes + pauseMinutes) / (mm + pauseMinutes));
-  for (let mm = 20; mm >= 12; mm--) {
-    const rounds = achievable(mm);
-    if (rounds >= roundsNeeded) return { matchMinutes: mm, rounds, fullCoverage: true };
-  }
-  const matchMinutes = 12;
-  const rounds = achievable(matchMinutes);
-  return { matchMinutes, rounds, fullCoverage: rounds >= roundsNeeded };
+  const options = computeMatchOptions({ n: playerCount, unitSize: 4, courts, tournamentMinutes, pauseMinutes, mmMin: 12, mmMax: 20 });
+  const best = options[0] || null;
+  if (!best) return { matchMinutes: 12, rounds: 0, lastRoundCapacity: 0, shortenedCount: 0, fullCoverage: false };
+  return {
+    matchMinutes: best.matchMinutes,
+    rounds: best.rounds,
+    lastRoundCapacity: best.lastRoundCapacity,
+    shortenedCount: best.shortenedCount,
+    fullCoverage: best.rounds >= roundsNeeded,
+  };
+}
+
+// Sama, aga tagastab KUNI 5 kehtivat valikut (mitte ainult ühte "parimat"), et kasutaja
+// saaks ise valida mänguaja/voorude-arvu kombinatsiooni vahel seadete ekraanil.
+export function listAmericanoMatchOptions({ tournamentMinutes, pauseMinutes, playerCount, courts }) {
+  const options = computeMatchOptions({ n: playerCount, unitSize: 4, courts, tournamentMinutes, pauseMinutes, mmMin: 12, mmMax: 20 });
+  return options.slice(0, 5);
 }
 
 // --- Play-off tabel (single elimination) ---

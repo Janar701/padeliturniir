@@ -277,9 +277,15 @@ function roundTimeWindows(t) {
   base.setHours(h, m, 0, 0);
   const matchMin = t.settings.matchMinutes || 0;
   const pauseMin = t.settings.pauseMinutes || 0;
+  // Kui võrdsuse tagamiseks lühendati mõnda vooru 1 minuti võrra (vt resolveExactRoundPlan),
+  // arvutatakse iga vooru enda kestuse järgi järjest, mitte ühtse kordajaga.
+  const shortenedRounds = Schedule.distributeShortenedRounds(t.slots.length, t.settings.shortenedCount || 0);
+  let cursor = base.getTime();
   return t.slots.map((_, i) => {
-    const start = new Date(base.getTime() + i * (matchMin + pauseMin) * 60000);
-    const end = new Date(start.getTime() + matchMin * 60000);
+    const durationMin = shortenedRounds.has(i) ? Math.max(1, matchMin - 1) : matchMin;
+    const start = new Date(cursor);
+    const end = new Date(start.getTime() + durationMin * 60000);
+    cursor = end.getTime() + pauseMin * 60000;
     return { start, end };
   });
 }
@@ -411,6 +417,39 @@ function formatHelpText(format) {
   return 'Americano: mängitakse alati 2 vs 2 (padelit ei saa üksi mängida), aga paariline ja vastased loositakse iga vooru uuesti, nii et kõik saavad võimalikult erinevad paarilised ja vastased. Vaja vähemalt 4 mängijat.';
 }
 
+// Ühe mänguaja-valiku kuvatav silt (kasutatakse nii americano kui lõdva paarismängu
+// "kuni 5 valiku" raadionuppude jaoks) — unitSize: 4 americanos (2 paari mängijatest),
+// 2 paarismängus (paar ise on juba pool mängust).
+function formatMatchOptionLabel(opt, unitSize, fullMatchesPerSlot, extraTail) {
+  const lastMatchesUsed = Math.floor((opt.lastRoundCapacity ?? fullMatchesPerSlot * unitSize) / unitSize);
+  const shortNote =
+    opt.shortenedCount > 0
+      ? opt.shortenedCount === 1
+        ? ', 1 voor on 1 min lühem'
+        : `, ${opt.shortenedCount} vooru on 1 min lühemad`
+      : '';
+  const lastRoundNote = lastMatchesUsed < fullMatchesPerSlot ? `, viimases voorus ${lastMatchesUsed}/${fullMatchesPerSlot} väljakut` : '';
+  const tail = typeof extraTail === 'function' ? extraTail(opt) : extraTail || '';
+  return `${opt.matchMinutes} min (${opt.rounds} vooru${shortNote}${lastRoundNote}${tail})`;
+}
+
+// Renderdab kuni 5 mänguaja-valikut raadionuppudena computedMatchBox sisse ja seob
+// muutuse kuulaja, mis kutsub onPick(valitudOptsioon) ilma kogu ajakava uuesti arvutamata.
+function renderMatchOptionsRadios(box, options, unitSize, fullMatchesPerSlot, extraTail, onPick) {
+  box.innerHTML = `<div class="radio-group">${options
+    .map(
+      (opt, i) =>
+        `<label><input type="radio" name="f_matchoption" value="${i}" ${i === 0 ? 'checked' : ''}/> ${formatMatchOptionLabel(opt, unitSize, fullMatchesPerSlot, extraTail)}</label>`
+    )
+    .join('')}</div>`;
+  box.querySelectorAll('input[name="f_matchoption"]').forEach((radio) =>
+    radio.addEventListener('change', () => {
+      if (radio.checked) onPick(options[parseInt(radio.value, 10)]);
+    })
+  );
+  onPick(options[0]);
+}
+
 function renderSettingsScreen(existing) {
   stopLiveSync();
   stopRoundTimer();
@@ -525,6 +564,9 @@ function renderSettingsScreen(existing) {
   const formatHelp = document.getElementById('formatHelp');
 
   let computedMatchMinutes = 0;
+  let computedGroupRounds = 0;
+  let computedShortenedCount = 0;
+  let computedLastRoundCapacity = null; // null = kõik voorud täisvõimsusel
   function recomputeMatchLength() {
     const format = document.querySelector('input[name="f_format"]:checked').value;
     const tournamentMinutes = parseInt(document.getElementById('f_tmin').value, 10) || 0;
@@ -539,19 +581,41 @@ function renderSettingsScreen(existing) {
       return;
     }
     if (isDoublesFormat(format)) {
-      // Paarismängus on täielik kate kohustuslik: iga paar mängib kõigi ülejäänud paaridega.
-      // Väljakud täidetakse pidevalt (õiglane, kõige vähem mänginud paarid mängivad esimesena) —
-      // "ajaperioodide" arv ei pruugi olla täpselt (paaride arv - 1), aga iga paar jõuab
-      // turniiri lõpuks siiski täpselt niipalju mänge mängida, kui tal on vastaseid.
+      // Paarismängus on täielik kate (iga paar mängib kõigi ülejäänud paaridega) eesmärk,
+      // AGA mitte iga hinna eest: kui see nõuaks alla 11-minutilisi mänge (liiga palju
+      // paare/liiga vähe aega), on see pikkus juba mängimiseks ebamõistlik — sellisel juhul
+      // loobutakse täielikust katvusest ja täidetakse väljakud õiglaselt (iga paar mängib nii
+      // palju kui mahub, aga mitte tingimata kõigiga) — sarnaselt üksikmänguga.
       const rounds = Schedule.estimateExactRoundRobinSlots(entityCount, courts);
       const gamesPerPair = entityCount - 1;
       const raw = (tournamentMinutes - (rounds - 1) * pauseMinutes) / rounds;
       const mm = Math.floor(raw);
-      computedMatchMinutes = mm;
-      if (mm < 1) {
-        box.innerHTML = `<span class="error">Turniir on liiga lühike (vajaks ${rounds} ajaperioodi) — pikenda turniiri, lisa väljakuid, vähenda pausi või mängijate arvu.</span>`;
-      } else {
+      if (mm >= 11) {
+        // mm >= 11 tagab juba mm >= 1, seega see haru annab alati mängitava tulemuse
+        // (generateExactRoundRobin garanteerib täpse võrdsuse iseenesest, mitte kunagi vahet).
+        computedMatchMinutes = mm;
+        computedGroupRounds = 0; // täielik katvus: buildSchedule arvutab voorude arvu ise (generateExactRoundRobin)
+        computedShortenedCount = 0;
+        computedLastRoundCapacity = null;
         box.innerHTML = `<strong>${mm} min</strong> <span class="muted small">(iga paar mängib ${gamesPerPair} vastasega, kokku ${rounds} ajaperioodi)</span>`;
+      } else {
+        const options = Schedule.listRelaxedMatchOptions({ tournamentMinutes, pauseMinutes, entityCount, courts });
+        if (!options.length) {
+          computedMatchMinutes = 0; // blokeeri "Edasi" nupp — täpne võrdsus pole selle seadistusega saavutatav
+          computedGroupRounds = 0;
+          computedShortenedCount = 0;
+          computedLastRoundCapacity = null;
+          box.innerHTML = `<span class="error">Selle paaride arvu, väljakute ja turniiriaja juures ei ole võimalik tagada, et kõik paarid saaksid täpselt võrdse arvu mänge — pikenda turniiri, lisa väljakuid, vähenda pausi või muuda paaride arvu.</span>`;
+        } else {
+          const fullMatchesPerSlot = Math.max(0, Math.min(courts, Math.floor(entityCount / 2)));
+          renderMatchOptionsRadios(box, options, 2, fullMatchesPerSlot, ' — liiga palju paare, et kõik jõuaksid kõigiga mängida', (opt) => {
+            computedMatchMinutes = opt.matchMinutes;
+            computedGroupRounds = opt.rounds;
+            computedShortenedCount = opt.shortenedCount || 0;
+            const lastMatchesUsed = Math.floor((opt.lastRoundCapacity ?? fullMatchesPerSlot * 2) / 2);
+            computedLastRoundCapacity = lastMatchesUsed < fullMatchesPerSlot ? opt.lastRoundCapacity : null;
+          });
+        }
       }
     } else {
       // Üksikmäng = Americano: mängitakse alati 2 vs 2, paarilised ja vastased loositakse
@@ -561,17 +625,24 @@ function renderSettingsScreen(existing) {
         box.innerHTML = `<span class="error">Üksikmängus (2 vs 2, paarilised loositakse) on vaja vähemalt 4 mängijat.</span>`;
         return;
       }
-      const { matchMinutes: mm, rounds, fullCoverage } = Schedule.pickAmericanoMatchMinutes({
-        tournamentMinutes,
-        pauseMinutes,
-        playerCount: entityCount,
-        courts,
-      });
-      computedMatchMinutes = mm;
-      if (rounds < 1) {
-        box.innerHTML = `<span class="error">Turniir on liiga lühike — pikenda turniiri, lisa väljakuid või vähenda pausi.</span>`;
+      const options = Schedule.listAmericanoMatchOptions({ tournamentMinutes, pauseMinutes, playerCount: entityCount, courts });
+      if (!options.length) {
+        computedMatchMinutes = 0; // blokeeri "Edasi" nupp — täpne võrdsus pole selle seadistusega saavutatav
+        computedGroupRounds = 0;
+        computedShortenedCount = 0;
+        computedLastRoundCapacity = null;
+        box.innerHTML = `<span class="error">Selle mängijate arvu, väljakute ja turniiriaja juures ei ole võimalik tagada, et kõik saaksid täpselt võrdse arvu mänge — pikenda turniiri, lisa väljakuid, vähenda pausi või muuda mängijate arvu.</span>`;
       } else {
-        box.innerHTML = `<strong>${mm} min</strong> <span class="muted small">(${rounds} vooru, 2 vs 2${fullCoverage ? ', kõik saavad kõigiga vähemalt korra paariliseks' : ', võimalikult erinevate paariliste ja vastastega'})</span>`;
+        const fullMatchesPerSlot = Math.max(0, Math.min(courts, Math.floor(entityCount / 4)));
+        const roundsNeeded = Schedule.estimateAmericanoPartnerRoundsNeeded(entityCount, courts);
+        const tail = (opt) => (opt.rounds >= roundsNeeded ? ', 2 vs 2, kõik saavad kõigiga vähemalt korra paariliseks' : ', 2 vs 2, võimalikult erinevate paariliste ja vastastega');
+        renderMatchOptionsRadios(box, options, 4, fullMatchesPerSlot, tail, (opt) => {
+          computedMatchMinutes = opt.matchMinutes;
+          computedGroupRounds = opt.rounds;
+          computedShortenedCount = opt.shortenedCount || 0;
+          const lastMatchesUsed = Math.floor((opt.lastRoundCapacity ?? fullMatchesPerSlot * 4) / 4);
+          computedLastRoundCapacity = lastMatchesUsed < fullMatchesPerSlot ? opt.lastRoundCapacity : null;
+        });
       }
     }
   }
@@ -597,6 +668,9 @@ function renderSettingsScreen(existing) {
       tournamentMinutes: parseInt(document.getElementById('f_tmin').value, 10),
       pauseMinutes: parseInt(document.getElementById('f_pause').value, 10),
       matchMinutes: computedMatchMinutes,
+      groupRounds: computedGroupRounds,
+      shortenedCount: computedShortenedCount,
+      lastRoundCapacity: computedLastRoundCapacity,
       courts: parseInt(document.getElementById('f_courts').value, 10),
       playersCount: parseInt(document.getElementById('f_players').value, 10),
       startTime: `${String(parseInt(document.getElementById('f_starttime_h').value, 10)).padStart(2, '0')}:${String(parseInt(document.getElementById('f_starttime_m').value, 10)).padStart(2, '0')}`,
@@ -626,7 +700,7 @@ function renderSettingsScreen(existing) {
       return;
     }
     if (!settings.matchMinutes || settings.matchMinutes < 1) {
-      errEl.textContent = 'Mängu pikkus tuleb liiga lühike välja — pikenda turniiri, lisa väljakuid, vähenda pausi või mängijate arvu.';
+      errEl.textContent = 'Selle seadistusega ei ole võimalik tagada, et kõik saaksid täpselt võrdse arvu mänge — pikenda turniiri, lisa väljakuid, vähenda pausi või muuda mängijate arvu.';
       errEl.classList.remove('hidden');
       return;
     }
@@ -809,11 +883,25 @@ function renderPlayersScreen(settings, existing) {
 // AJAKAVA GENEREERIMINE
 // ---------------------------------------------------------------------------
 function buildSchedule(t, teamOrderIds) {
-  const { format, tournamentMinutes, matchMinutes, pauseMinutes, courts, finalists } = t.settings;
+  const { format, tournamentMinutes, matchMinutes, pauseMinutes, courts, finalists, groupRounds, lastRoundCapacity } = t.settings;
   const pause = pauseMinutes || 0;
   const totalSlots = Math.max(1, Math.floor((tournamentMinutes + pause) / (matchMinutes + pause)));
   const playoffSlots = finalists > 0 ? Math.log2(finalists) : 0;
   const groupSlots = Math.max(1, totalSlots - playoffSlots);
+  // Ainult americano/lõdva paarismängu jaoks: sama TÄPNE voorude arv, mis seadete
+  // ekraanil juba arvutati (vt recomputeMatchLength) — see arvestab juba võrdsuse
+  // tagamiseks vajaliku lühendamisega, seega EI arvutata seda siin uuesti lihtsa jagamisega.
+  const exactGroupSlots = Math.max(1, (groupRounds || groupSlots) - playoffSlots);
+  // lastRoundCapacity kehtib seadete ekraanil arvutatud VIIMASE vooru kohta — kui
+  // play-off võtab lõpust vooru(sid) ära, nihkub "viimane voor" ja tuleb selle
+  // (väiksema) voorude arvu jaoks uuesti arvutada (harv kombinatsioon: lõdva
+  // katvusega + play-off).
+  let effectiveLastRoundCapacity = lastRoundCapacity;
+  if (playoffSlots > 0 && (lastRoundCapacity != null || groupRounds)) {
+    const n = isDoublesFormat(format) ? Math.floor(t.players.length / 2) : t.players.length;
+    const unitSize = isDoublesFormat(format) ? 2 : 4;
+    effectiveLastRoundCapacity = Schedule.findLastRoundCapacityForRounds(n, unitSize, courts, exactGroupSlots);
+  }
   const allPlayerIds = t.players.map((p) => p.id);
 
   const toMatches = (rawMatches) =>
@@ -838,16 +926,29 @@ function buildSchedule(t, teamOrderIds) {
     t.teams = teams;
     const entityPlayers = {};
     teams.forEach((team) => (entityPlayers[team.id] = team.playerIds));
-    // Iga paar mängib iga teise paariga TÄPSELT üks kord (mitte kunagi rohkem) — nii on
-    // mängude arv kõigile täpselt võrdne. Väljakud täidetakse võimalikult täis, ainult
-    // viimane(sed) ajaperiood(id) võivad väljakupuudusel jääda osaliseks.
-    const rawSlots = Schedule.generateExactRoundRobin({ entities: teams.map((tm) => tm.id), entityPlayers, courts, maxSlots: groupSlots });
+    // Sama 11-minutilise piiri kontroll, mida seaded-ekraan mängu pikkuse valikul juba
+    // tegi (vt recomputeMatchLength) — kui täieliku katvuse nõue teeks mängud liiga
+    // lühikeseks, ei nõuta enam, et iga paar mängiks kõigi teistega, vaid väljakud
+    // täidetakse õiglaselt olemasoleva aja sees (sarnaselt üksikmänguga).
+    const fullCoverageRounds = Schedule.estimateExactRoundRobinSlots(teams.length, courts);
+    const fullCoverageMm = Math.floor((tournamentMinutes - (fullCoverageRounds - 1) * pause) / fullCoverageRounds);
+    let rawSlots;
+    if (fullCoverageMm >= 11) {
+      // Iga paar mängib iga teise paariga TÄPSELT üks kord (mitte kunagi rohkem) — nii on
+      // mängude arv kõigile täpselt võrdne. Väljakud täidetakse võimalikult täis, ainult
+      // viimane(sed) ajaperiood(id) võivad väljakupuudusel jääda osaliseks.
+      rawSlots = Schedule.generateExactRoundRobin({ entities: teams.map((tm) => tm.id), entityPlayers, courts, maxSlots: groupSlots });
+    } else {
+      // Liiga palju paare antud aja jaoks — täielikku katvust ei nõuta, väljakud
+      // täidetakse õiglaselt (kõige vähem mänginud paarid mängivad esimesena).
+      rawSlots = Schedule.generateFairSlots({ entities: teams.map((tm) => tm.id), entityPlayers, courts, maxSlots: exactGroupSlots, mode: 'americano', lastRoundCapacity: effectiveLastRoundCapacity });
+    }
     t.slots = rawSlots.map((s, idx) => ({ round: idx + 1, matches: toMatches(s.matches), resting: s.resting }));
   } else {
     // Üksikmäng = padeli "Americano": padelit ei saa mängida 1 vastu 1, seega mängitakse
     // ikka 2 vs 2, aga paariline ja vastased loositakse iga vooru uuesti (eraldi loogika
     // paarismängust — vt generateAmericanoDoublesSlots).
-    const rawSlots = Schedule.generateAmericanoDoublesSlots({ players: allPlayerIds, courts, maxSlots: groupSlots });
+    const rawSlots = Schedule.generateAmericanoDoublesSlots({ players: allPlayerIds, courts, maxSlots: exactGroupSlots, lastRoundCapacity: effectiveLastRoundCapacity });
     t.slots = rawSlots.map((s, idx) => ({ round: idx + 1, matches: toMatches(s.matches), resting: s.resting }));
   }
 }

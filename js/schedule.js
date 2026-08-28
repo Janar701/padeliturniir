@@ -462,7 +462,7 @@ export function generateAmericanoDoublesSlots({ players, courts, maxSlots, lastR
   let bestBadness = Infinity;
   for (let oa = 0; oa < outerAttempts; oa++) {
     const candidate = attemptFullSchedule(players, courts, maxSlots, lastRoundCapacity);
-    repairScheduleGlobally(candidate, n);
+    repairScheduleGlobally(candidate, n, players);
     const badness = scheduleBadness(candidate, n);
     if (badness < bestBadness) {
       bestBadness = badness;
@@ -504,7 +504,7 @@ function scheduleBadness(slots, n) {
 // palju, lihtsalt osalt erinevates voorudes) — seega ei saa see kunagi rikkuda juba
 // tagatud võrdset mängude arvu. Aktsepteeritakse ainult vahetusi, mis ei tee asja
 // halvemaks (korduvate paariliste/vastaste koguskoori mõttes).
-function repairScheduleGlobally(slots, n) {
+function repairScheduleGlobally(slots, n, players) {
   const roundArrays = slots.map((slot) => slot.matches.flatMap((m) => [...m.side1, ...m.side2]));
   const numRounds = roundArrays.length;
   if (numRounds < 2) return;
@@ -624,6 +624,10 @@ function repairScheduleGlobally(slots, n) {
   }
 
   // Kirjuta parandatud kohad tagasi slots struktuuri (samad väljakud, uued kokkupanekud).
+  // TÄHTIS: kohavahetus võib muuta, KES on üldse sel voorul aktiivne (mängija, kes oli
+  // enne puhkamas, võib nüüd olla mängus, ja vastupidi) — seepärast tuleb "resting"
+  // nimekiri IGA vooru jaoks uuesti arvutada, mitte jätta vana (enne parandust arvutatud)
+  // nimekirja alles, muidu võib sama mängija olla korraga nii "puhkab" kui väljakul.
   slots.forEach((slot, si) => {
     const arr = roundArrays[si];
     const matchesPerSlotHere = slot.matches.length;
@@ -631,6 +635,8 @@ function repairScheduleGlobally(slots, n) {
       slot.matches[mi].side1 = [arr[mi * 4], arr[mi * 4 + 1]];
       slot.matches[mi].side2 = [arr[mi * 4 + 2], arr[mi * 4 + 3]];
     }
+    const activeIds = new Set(arr);
+    slot.resting = players.filter((id) => !activeIds.has(id));
   });
 }
 

@@ -18,12 +18,12 @@ function loadContext() {
   if (!ctxPromise) {
     ctxPromise = (async () => {
       const { initializeApp } = await import(`https://www.gstatic.com/firebasejs/${SDK_VERSION}/firebase-app.js`);
-      const { getFirestore, doc, setDoc, getDoc, onSnapshot, collection, query, where, getDocs } = await import(
+      const { getFirestore, doc, setDoc, getDoc, deleteDoc, onSnapshot, collection, query, where, getDocs } = await import(
         `https://www.gstatic.com/firebasejs/${SDK_VERSION}/firebase-firestore.js`
       );
       const app = initializeApp(firebaseConfig);
       const db = getFirestore(app);
-      return { app, db, doc, setDoc, getDoc, onSnapshot, collection, query, where, getDocs };
+      return { app, db, doc, setDoc, getDoc, deleteDoc, onSnapshot, collection, query, where, getDocs };
     })();
   }
   return ctxPromise;
@@ -83,6 +83,14 @@ export async function cloudSave(tournament) {
   const ctx = await loadContext();
   const ref = ctx.doc(ctx.db, 'tournaments', tournament.id);
   await ctx.setDoc(ref, tournament);
+  return true;
+}
+
+export async function cloudDelete(id) {
+  if (!isCloudConfigured()) return false;
+  const ctx = await loadContext();
+  const ref = ctx.doc(ctx.db, 'tournaments', id);
+  await ctx.deleteDoc(ref);
   return true;
 }
 

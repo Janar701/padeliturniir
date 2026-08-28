@@ -476,23 +476,38 @@ export function generateAmericanoDoublesSlots({ players, courts, maxSlots, lastR
 // Loeb kokku, kui "halb" ajakava on — iga mängija puuduolevate vastaste arv ruudus
 // (nii et "üks mängija kellel palju puudu" on hullem kui "mitu mängijat kellel üks
 // puudu") — kasutatakse mitme täieliku katse hulgast parima valimiseks.
+// TÄHTIS: peab arvestama nii vastaseid KUI paarilisi — kui siin vaadataks ainult
+// vastaseid (nagu varem), võiks "mitme katse hulgast parim" valik lõpuks eelistada
+// kandidaati, kus keegi ei saanudki kõigiga paariliseks, lihtsalt sellepärast, et
+// vastaste pool nägi paremini välja. Paarilised on kaalutud kõrgemalt (×3), samamoodi
+// nagu ühe vooru enda otsingus ja parandusotsingus (partneri kordus on halvem kui
+// vastase kordus).
 function scheduleBadness(slots, n) {
   const oppFaced = {};
+  const partnerFaced = {};
   slots.forEach((slot) =>
     slot.matches.forEach((m) => {
       [...m.side1, ...m.side2].forEach((x) => {
         if (!oppFaced[x]) oppFaced[x] = new Set();
+        if (!partnerFaced[x]) partnerFaced[x] = new Set();
       });
       m.side1.forEach((x) => m.side2.forEach((y) => {
         oppFaced[x].add(y);
         oppFaced[y].add(x);
       }));
+      const [p1a, p1b] = m.side1;
+      partnerFaced[p1a].add(p1b);
+      partnerFaced[p1b].add(p1a);
+      const [p2a, p2b] = m.side2;
+      partnerFaced[p2a].add(p2b);
+      partnerFaced[p2b].add(p2a);
     })
   );
   let total = 0;
   Object.keys(oppFaced).forEach((p) => {
-    const missing = n - 1 - oppFaced[p].size;
-    total += missing * missing;
+    const missingOpp = n - 1 - oppFaced[p].size;
+    const missingPartner = n - 1 - partnerFaced[p].size;
+    total += missingOpp * missingOpp + missingPartner * missingPartner * 3;
   });
   return total;
 }
@@ -536,21 +551,34 @@ function repairScheduleGlobally(slots, n, players) {
   };
   roundArrays.forEach((arr) => applyCounts(arr, 1));
 
+  // TÄHTIS: peab arvestama nii vastaseid KUI paarilisi (mitte ainult vastaseid nagu
+  // varem) — muidu võib "parim seni nähtud seis" salvestada olukorra, kus keegi ei
+  // saanudki kõigi võimalike paarilistega mängida, lihtsalt sellepärast, et vastaste
+  // pool nägi sel hetkel paremini välja. Paarilised kaalutud kõrgemalt (×3), samamoodi
+  // nagu roundScore's endas.
   const globalBadness = () => {
     const oppFaced = {};
+    const partnerFaced = {};
     roundArrays.forEach((arr) => {
-      const { opponents } = roundPairs(arr);
+      const { partners, opponents } = roundPairs(arr);
       opponents.forEach(([x, y]) => {
         if (!oppFaced[x]) oppFaced[x] = new Set();
         if (!oppFaced[y]) oppFaced[y] = new Set();
         oppFaced[x].add(y);
         oppFaced[y].add(x);
       });
+      partners.forEach(([x, y]) => {
+        if (!partnerFaced[x]) partnerFaced[x] = new Set();
+        if (!partnerFaced[y]) partnerFaced[y] = new Set();
+        partnerFaced[x].add(y);
+        partnerFaced[y].add(x);
+      });
     });
     let total = 0;
     Object.keys(oppFaced).forEach((p) => {
-      const missing = n - 1 - oppFaced[p].size;
-      total += missing * missing;
+      const missingOpp = n - 1 - oppFaced[p].size;
+      const missingPartner = n - 1 - (partnerFaced[p] ? partnerFaced[p].size : 0);
+      total += missingOpp * missingOpp + missingPartner * missingPartner * 3;
     });
     return total;
   };

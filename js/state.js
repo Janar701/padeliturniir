@@ -1,7 +1,7 @@
 // Turniiride salvestamine brauseri localStorage'isse (kohalik koopia / "Minu turniirid" nimekiri)
 // ning kui Firebase on seadistatud, ka pilve (et jagamislingid saaksid töötada ja uueneda).
 import { uid } from './util.js';
-import { cloudSave, isCloudConfigured } from './cloud.js';
+import { cloudSave, cloudDelete, isCloudConfigured } from './cloud.js';
 
 const STORAGE_KEY = 'padel_turniirid_v1';
 
@@ -40,6 +40,12 @@ export function saveTournament(t) {
 
 export function deleteTournament(id) {
   saveAll(loadAll().filter((t) => t.id !== id));
+  if (isCloudConfigured()) {
+    cloudDelete(id).catch((err) => {
+      console.error('Pilvest kustutamine ebaõnnestus', err);
+      window.dispatchEvent(new CustomEvent('cloud-error', { detail: err.message }));
+    });
+  }
 }
 
 // Lisab/uuendab kohalikku nimekirja pilvest loetud turniiridega (nt sisselogitud

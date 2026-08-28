@@ -350,9 +350,9 @@ async function renderHome() {
     })
   );
   appEl.querySelectorAll('.del-btn').forEach((b) =>
-    b.addEventListener('click', () => {
+    b.addEventListener('click', async () => {
       if (confirm('Kustutada see turniir jäädavalt?')) {
-        State.deleteTournament(b.dataset.id);
+        await State.deleteTournament(b.dataset.id);
         renderHome();
       }
     })

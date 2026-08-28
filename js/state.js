@@ -38,13 +38,15 @@ export function saveTournament(t) {
   return t;
 }
 
-export function deleteTournament(id) {
+export async function deleteTournament(id) {
   saveAll(loadAll().filter((t) => t.id !== id));
   if (isCloudConfigured()) {
-    cloudDelete(id).catch((err) => {
+    try {
+      await cloudDelete(id);
+    } catch (err) {
       console.error('Pilvest kustutamine ebaõnnestus', err);
       window.dispatchEvent(new CustomEvent('cloud-error', { detail: err.message }));
-    });
+    }
   }
 }
 

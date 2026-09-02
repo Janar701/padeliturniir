@@ -1,6 +1,6 @@
 import * as State from './state.js';
 import * as Schedule from './schedule.js';
-import { computeStandings, computeTeamStandings, findLeaderWithTieInfo, methodLabel } from './standings.js';
+import { computeStandings, computeTeamStandings, computeScheduledCounts, computeTeamScheduledCounts, findLeaderWithTieInfo, methodLabel } from './standings.js';
 import { buildViewUrl, buildEditUrl, parseShareHash } from './share.js';
 import { isCloudConfigured, cloudGet, cloudWatch, queryMyTournaments, getCurrentUser, onAuthChange, signInWithGoogle, signOutUser } from './cloud.js';
 import { uid, shuffle } from './util.js';
@@ -502,6 +502,7 @@ function renderSettingsScreen(existing) {
         <div class="field">
           <label>Väljakute arv ${infoIcon('Mitu mängu saab samal ajal käia (nii palju padeliväljakuid on kasutada).')}</label>
           <input type="number" id="f_courts" min="1" step="1" value="${s.courts}" />
+          <p class="muted small" id="courtsHint"></p>
         </div>
         <div class="field">
           <label>Mängijate arv ${infoIcon('Kokku osalejate arv. Paarismängus peab olema paarisarv.')}</label>
@@ -575,6 +576,19 @@ function renderSettingsScreen(existing) {
     const playersCount = parseInt(document.getElementById('f_players').value, 10) || 0;
     const entityCount = isDoublesFormat(format) ? Math.floor(playersCount / 2) : playersCount;
     const box = document.getElementById('computedMatchBox');
+    const courtsHint = document.getElementById('courtsHint');
+    // Väljakuid saab korraga kasutada ainult nii palju, kui mängijate arv üldse mängude
+    // täitmiseks lubab (paarismängus 2 paari, üksikmängus 4 mängijat ühe mängu kohta) —
+    // rohkem väljakuid kui seda ei aita, need lihtsalt jäävad tühjaks. Näita seda selgelt,
+    // et "väljakute arvu suurendamine ei muuda midagi" ei tunduks veana.
+    if (courtsHint) {
+      const unitSizeForCourts = isDoublesFormat(format) ? 2 : 4;
+      const usableCourts = entityCount >= unitSizeForCourts ? Math.floor(entityCount / unitSizeForCourts) : 0;
+      courtsHint.textContent =
+        courts > usableCourts && usableCourts > 0
+          ? `Praeguse mängijate arvuga mahub korraga käima ainult ${usableCourts} väljak${usableCourts === 1 ? '' : 'ut'} — ülejäänud jääksid mängude ajal tühjaks.`
+          : '';
+    }
     if (entityCount < 2 || courts < 1 || tournamentMinutes < 1) {
       computedMatchMinutes = 0;
       box.innerHTML = `<span class="muted">Täida enne teised väljad</span>`;
@@ -608,7 +622,14 @@ function renderSettingsScreen(existing) {
           box.innerHTML = `<span class="error">Selle paaride arvu, väljakute ja turniiriaja juures ei ole võimalik tagada, et kõik paarid saaksid täpselt võrdse arvu mänge — pikenda turniiri, lisa väljakuid, vähenda pausi või muuda paaride arvu.</span>`;
         } else {
           const fullMatchesPerSlot = Math.max(0, Math.min(courts, Math.floor(entityCount / 2)));
-          renderMatchOptionsRadios(box, options, 2, fullMatchesPerSlot, ' — liiga palju paare, et kõik jõuaksid kõigiga mängida', (opt) => {
+          // Iga valikul (mitte kõigil ühtemoodi) tuleb eraldi kontrollida, kas SELLE
+          // voorude arvuga jõuab õiglane (generateFairSlots) ajastaja täieliku katvuseni —
+          // sama muster, mida americano allpool juba kasutab. Ilma selleta näidati varem
+          // KÕIGIL valikutel sama "liiga palju paare" teksti, isegi kui mõni valik
+          // (nt kõige rohkem voore) oleks täieliku katvuse tegelikult juba saavutanud.
+          const roundsNeeded = Schedule.estimateRoundsForFullCoverage(entityCount, courts);
+          const tail = (opt) => (opt.rounds >= roundsNeeded ? ', kõik paarid jõuavad kõigiga mängida' : ' — liiga palju paare, et kõik jõuaksid kõigiga mängida');
+          renderMatchOptionsRadios(box, options, 2, fullMatchesPerSlot, tail, (opt) => {
             computedMatchMinutes = opt.matchMinutes;
             computedGroupRounds = opt.rounds;
             computedShortenedCount = opt.shortenedCount || 0;
@@ -960,6 +981,12 @@ function renderTournamentScreen(t, { readOnly }) {
   const isDoubles = isDoublesFormat(t.settings.format);
   const winnerRule = t.settings.winnerRule || 'wins';
   const standings = isDoubles ? computeTeamStandings(t, winnerRule) : computeStandings(t, winnerRule);
+  // "played" pingereas loeb ainult juba tulemusega mänge — keset turniiri on see
+  // paratamatult eri paaride/mängijate vahel erinev (nemad ei ole veel kõiki oma voore
+  // mänginud/tulemust sisestanud). scheduledCounts annab "kokku plaanis" numbri, mida
+  // "Mänge" veerus "senini / kokku" kujul kõrvale näidatakse, et see erinevus ei jätaks
+  // muljet, nagu oleks ajakava ise ebavõrdne (vt computeScheduledCounts kommentaari).
+  const scheduledCounts = isDoubles ? computeTeamScheduledCounts(t) : computeScheduledCounts(t);
   const roundWindows = roundTimeWindows(t);
 
   // Grupeeri slotid loogilise vooru järgi — paarismängus võib üks voor (kui väljakuid napib)
@@ -1023,11 +1050,11 @@ function renderTournamentScreen(t, { readOnly }) {
 
   const standingsHtml = `
     <table class="table standings-table">
-      <thead><tr><th>#</th><th>${isDoubles ? 'Paar' : 'Mängija'}</th><th>V</th><th>K</th><th>Viik</th><th>Punktid</th><th>V-K</th><th>Mänge</th></tr></thead>
+      <thead><tr><th>#</th><th>${isDoubles ? 'Paar' : 'Mängija'}</th><th>V</th><th>K</th><th>Viik</th><th>Punktid</th><th>V-K</th><th>Mänge ${infoIcon('Senini sisestatud tulemustega mängude arv / kokku ajakavas planeeritud mängude arv. Kuni kõigi voorude tulemused on sisestatud, on "senini" number paratamatult erinev — ajakava ise annab kõigile lõpuks täpselt sama "kokku" arvu.')}</th></tr></thead>
       <tbody>
         ${standings
           .map(
-            (r, i) => `<tr><td>${i + 1}</td><td>${escapeHtml(r.name)}</td><td>${r.wins}</td><td>${r.losses}</td><td>${r.draws}</td><td>${standingsPoints(r, winnerRule)}</td><td>${r.pointsFor - r.pointsAgainst}</td><td>${r.played}</td></tr>`
+            (r, i) => `<tr><td>${i + 1}</td><td>${escapeHtml(r.name)}</td><td>${r.wins}</td><td>${r.losses}</td><td>${r.draws}</td><td>${standingsPoints(r, winnerRule)}</td><td>${r.pointsFor - r.pointsAgainst}</td><td>${r.played} / ${scheduledCounts[r.id] ?? r.played}</td></tr>`
           )
           .join('')}
       </tbody>
@@ -1229,13 +1256,14 @@ function renderPlayoffScreen(t, { readOnly }) {
   const isDoubles = isDoublesFormat(t.settings.format);
   const winnerRule = t.settings.winnerRule || 'wins';
   const overallStandings = isDoubles ? computeTeamStandings(t, winnerRule) : computeStandings(t, winnerRule);
+  const overallScheduledCounts = isDoubles ? computeTeamScheduledCounts(t) : computeScheduledCounts(t);
   const overallStandingsHtml = `
     <table class="table standings-table">
-      <thead><tr><th>#</th><th>${isDoubles ? 'Paar' : 'Mängija'}</th><th>V</th><th>K</th><th>Viik</th><th>Punktid</th><th>V-K</th><th>Mänge</th></tr></thead>
+      <thead><tr><th>#</th><th>${isDoubles ? 'Paar' : 'Mängija'}</th><th>V</th><th>K</th><th>Viik</th><th>Punktid</th><th>V-K</th><th>Mänge ${infoIcon('Senini sisestatud tulemustega mängude arv / kokku ajakavas planeeritud mängude arv (rühmamängud).')}</th></tr></thead>
       <tbody>
         ${overallStandings
           .map(
-            (r, i) => `<tr><td>${i + 1}</td><td>${escapeHtml(r.name)}</td><td>${r.wins}</td><td>${r.losses}</td><td>${r.draws}</td><td>${standingsPoints(r, winnerRule)}</td><td>${r.pointsFor - r.pointsAgainst}</td><td>${r.played}</td></tr>`
+            (r, i) => `<tr><td>${i + 1}</td><td>${escapeHtml(r.name)}</td><td>${r.wins}</td><td>${r.losses}</td><td>${r.draws}</td><td>${standingsPoints(r, winnerRule)}</td><td>${r.pointsFor - r.pointsAgainst}</td><td>${r.played} / ${overallScheduledCounts[r.id] ?? r.played}</td></tr>`
           )
           .join('')}
       </tbody>

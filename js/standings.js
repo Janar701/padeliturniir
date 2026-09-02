@@ -107,6 +107,39 @@ export function computeTeamStandings(tournament, method = 'wins') {
   return sortByMethod(buildTeamRows(tournament), method);
 }
 
+// Kui palju mänge on igale MÄNGIJALE ajakavas kokku planeeritud (kõik voorud, olenemata
+// sellest, kas tulemus on juba sisestatud). Pingerea "played" loeb ainult juba sisestatud
+// tulemustega mänge, seega näitab see keset turniiri paratamatult erinevaid numbreid eri
+// paaride/mängijate vahel (nemad ei ole veel kõik sama arvu voore mänginud/tulemust
+// sisestanud) — see EI tähenda, et ajakava ise oleks ebavõrdne. See funktsioon annab
+// "kokku plaanis" numbri, mida saab "senini mängitud" numbri kõrval näidata, et vahe
+// oleks kasutajale selge (vt renderTournamentScreen/renderPlayoffScreen "Mänge" veerg).
+export function computeScheduledCounts(tournament) {
+  const counts = {};
+  tournament.players.forEach((p) => (counts[p.id] = 0));
+  (tournament.slots || []).forEach((slot) => {
+    slot.matches.forEach((m) => {
+      const side1 = m.side1Players || m.side1;
+      const side2 = m.side2Players || m.side2;
+      [...side1, ...side2].forEach((id) => {
+        if (counts[id] != null) counts[id] += 1;
+      });
+    });
+  });
+  return counts;
+}
+
+// Sama, aga paari (mitte üksikmängija) kohta — paarilised mängivad alati koos, seega
+// paari kokku-plaanitud mängude arv on lihtsalt ühe paarilise oma.
+export function computeTeamScheduledCounts(tournament) {
+  const perPlayer = computeScheduledCounts(tournament);
+  const counts = {};
+  (tournament.teams || []).forEach((team) => {
+    counts[team.id] = perPlayer[team.playerIds[0]] || 0;
+  });
+  return counts;
+}
+
 // Kui pingerea tipus on viik valitud meetodi järgi, proovi mõne teise meetodiga leida
 // ühene juht — kasutatakse "hetkel juhib / võitja" bänneris viigi korral vihjena.
 export function findLeaderWithTieInfo(standings, method) {

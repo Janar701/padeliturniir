@@ -457,7 +457,7 @@ export function generateAmericanoDoublesSlots({ players, courts, maxSlots, lastR
   // (eriti lühikese) turniiri puhul jääb puhas "ainult parem" otsing mõnikord
   // kohalikku miinimumi kinni — seepärast proovitakse paar korda uuesti ja jäetakse
   // parim (samamoodi nagu iga üksiku vooru sees juba tehakse).
-  const outerAttempts = n <= 14 ? 3 : n <= 22 ? 2 : 1;
+  const outerAttempts = n <= 14 ? 3 : n <= 22 ? 3 : 1;
   let best = null;
   let bestBadness = Infinity;
   for (let oa = 0; oa < outerAttempts; oa++) {
@@ -507,7 +507,13 @@ function scheduleBadness(slots, n) {
   Object.keys(oppFaced).forEach((p) => {
     const missingOpp = n - 1 - oppFaced[p].size;
     const missingPartner = n - 1 - partnerFaced[p].size;
-    total += missingOpp * missingOpp + missingPartner * missingPartner * 3;
+    // Vastaste puudujääk on KUUP (mitte ruut) — see karistab ÜHE mängija koondunud
+    // puudujääki (nt puudu 3, kordub 1x kellegagi topelt) palju karmimalt kui sama
+    // puudujääk laiali jaotatuna mitme mängija vahel (nt kõik puudu ainult 1) — nii
+    // eelistab "mitme katse hulgast parim" valik alati laiali jaotatud, mitte
+    // koondunud korduseid, mis oli täpselt kasutaja kirjeldatud probleem (vt
+    // repairScheduleGlobally roundScore/globalBadness sama muudatus).
+    total += missingOpp * missingOpp * missingOpp + missingPartner * missingPartner * 3;
   });
   return total;
 }
@@ -541,7 +547,10 @@ function repairScheduleGlobally(slots, n, players) {
     const { partners, opponents } = roundPairs(arr);
     let s = 0;
     partners.forEach(([x, y]) => { s += (partnerCount[pairKey(x, y)] || 0) ** 2 * 3; });
-    opponents.forEach(([x, y]) => { s += (opponentCount[pairKey(x, y)] || 0) ** 2; });
+    // Kuup (mitte ruut) — vt scheduleBadness kommentaari: nii "maksab" iga JÄRGMINE
+    // kordus sama vastasega palju rohkem kui eelmine, mis suunab otsingu tugevalt
+    // eelistama VÄRSKET vastast, kui üks on veel valimata (mitte lihtsalt "vähem halba").
+    opponents.forEach(([x, y]) => { s += (opponentCount[pairKey(x, y)] || 0) ** 3; });
     return s;
   };
   const applyCounts = (arr, delta) => {
@@ -578,7 +587,7 @@ function repairScheduleGlobally(slots, n, players) {
     Object.keys(oppFaced).forEach((p) => {
       const missingOpp = n - 1 - oppFaced[p].size;
       const missingPartner = n - 1 - (partnerFaced[p] ? partnerFaced[p].size : 0);
-      total += missingOpp * missingOpp + missingPartner * missingPartner * 3;
+      total += missingOpp * missingOpp * missingOpp + missingPartner * missingPartner * 3;
     });
     return total;
   };
@@ -724,7 +733,8 @@ function attemptFullSchedule(players, courts, maxSlots, lastRoundCapacity) {
       });
       matches.forEach(([teamA, teamB]) => {
         teamA.forEach((x) => teamB.forEach((y) => {
-          score += (opponentCount[pairKey(x, y)] || 0) ** 2;
+          // Kuup, mitte ruut — vt scheduleBadness kommentaari.
+          score += (opponentCount[pairKey(x, y)] || 0) ** 3;
         }));
       });
 

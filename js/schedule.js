@@ -71,13 +71,45 @@ export function generateExactRoundRobin({ entities, entityPlayers, courts, maxSl
   const rounds = circleMethodRounds(entities);
   const fullSlots = [];
   const leftoverPairs = [];
-  for (const roundPairs of rounds) {
-    for (let i = 0; i + matchesPerSlot <= roundPairs.length; i += matchesPerSlot) {
-      fullSlots.push(roundPairs.slice(i, i + matchesPerSlot));
+  // TÄHTIS: ring-meetod hoiab ÜHE osaleja ("fixed") alati sama positsiooni peal iga
+  // vooru paaristamisel — kui iga voor jagataks otse (esimesed `matchesPerSlot` paari
+  // "täis", ülejäänud "ülejääk") ILMA valikuta, jääks mõni paar IGA kord samasse (kunagi
+  // mitte ülejäägisse deferitavasse) positsiooni ja mõni teine paar jääks ALATI ülejääki
+  // — see tekitanuks täpselt teatatud vea: üks paar mängib järjest kõik "täis" voorud
+  // ja puhkab siis järjest kõik "ülejäägi" voorud korraga, kuigi mängude KOGUARV on
+  // ikka võrdne. (Lihtne "roteeri positsiooni järgi" katse ei aidanud päriselt — ring-
+  // meetodi enda sisemine rotatsioon võib sellega kokku mängida ja probleemi lihtsalt
+  // mõne TEISE paari peale nihutada.) Selle asemel valime IGAS voorus ülejääki mineva(d)
+  // paari(d) ÕIGLASE ahne valikuga: eelistame alati paare, mille osalised on SENI kõige
+  // VÄHEM kordi ülejääki jäänud — nii jaotub "ülejääki jäämise" (st puhkamise ajastuse,
+  // mitte ainult koguarvu) koormus kõigi osaliste vahel ühtlaselt, sõltumata ring-
+  // meetodi enda sisemisest struktuurist.
+  const deferredCount = {};
+  entities.forEach((id) => (deferredCount[id] = 0));
+  rounds.forEach((roundPairs) => {
+    const total = roundPairs.length;
+    const numFull = Math.floor(total / matchesPerSlot);
+    const leftoverHere = total - numFull * matchesPerSlot;
+    if (leftoverHere <= 0) {
+      fullSlots.push(roundPairs);
+      return;
     }
-    const remainderStart = Math.floor(roundPairs.length / matchesPerSlot) * matchesPerSlot;
-    for (let i = remainderStart; i < roundPairs.length; i++) leftoverPairs.push(roundPairs[i]);
-  }
+    const scored = roundPairs.map((pair) => ({ pair, score: deferredCount[pair[0]] + deferredCount[pair[1]] }));
+    scored.sort((a, b) => a.score - b.score);
+    scored.slice(0, leftoverHere).forEach(({ pair }) => {
+      deferredCount[pair[0]] += 1;
+      deferredCount[pair[1]] += 1;
+      leftoverPairs.push(pair);
+    });
+    // Sega järjekord enne perioodideks lõikamist ja väljakute-järjekorra jaoks — muidu
+    // kipub sama paar (kes harva ülejääki jääb) alati sarnasele positsioonile jääma, mis
+    // näitaks teda pidevalt SAMAL väljakul. Sisu (kes kellega ja mis voorus) ei muutu,
+    // ainult väljaku-number.
+    const kept = shuffle(scored.slice(leftoverHere).map((s) => s.pair));
+    for (let i = 0; i + matchesPerSlot <= kept.length; i += matchesPerSlot) {
+      fullSlots.push(kept.slice(i, i + matchesPerSlot));
+    }
+  });
 
   // Üks katse: paki ülejäägi-mängud ahnelt slottidesse (iga slot proovitakse mitme
   // juhusliku järjestusega täita nii täis kui võimalik).
@@ -131,7 +163,60 @@ export function generateExactRoundRobin({ entities, entityPlayers, courts, maxSl
     }
   }
 
-  const bestSlots = [...fullSlots, ...bestLeftoverSlots].slice(0, maxSlots);
+  const assembledSlots = [...fullSlots, ...bestLeftoverSlots];
+
+  // Lisapööre: PERIOODIDE JÄRJEKORDA saab vabalt ümber tõsta (matšid ise — kes kellega
+  // ja millises perioodis mängib — ei muutu, ainult MIS JÄRJEKORRAS need perioodid
+  // toimuvad), et minimeerida "puhkab kaks järjestikust voorud" juhtumeid. See ei saa
+  // KUNAGI rikkuda mängude koguarvu ega väljakute täituvust — vahetame ainult SAMA
+  // suurusega (sama mängude arvuga) perioodide asukohti, seega "väljak ei jää kunagi
+  // tühjaks keset turniiri, ainult kõige lõpus" reegel jääb täpselt samaks (perioodide
+  // suuruste JÄRJEKORD ise ei muutu, ainult sama suurusega perioodide sisemine järjekord).
+  const restSets = assembledSlots.map((period) => {
+    const active = new Set(period.flat());
+    return entities.filter((id) => !active.has(id));
+  });
+  const countAdjacentRests = (order) => {
+    let v = 0;
+    for (let i = 0; i < order.length - 1; i++) {
+      const a = restSets[order[i]];
+      const bSet = new Set(restSets[order[i + 1]]);
+      a.forEach((id) => { if (bSet.has(id)) v++; });
+    }
+    return v;
+  };
+  let order = assembledSlots.map((_, i) => i);
+  let curViol = countAdjacentRests(order);
+  let bestViol = curViol;
+  if (bestViol > 0 && assembledSlots.length > 2) {
+    let bestOrder = [...order];
+    const sameSizeSwappable = assembledSlots.length <= 60;
+    const iterations = sameSizeSwappable ? Math.min(60000, assembledSlots.length * assembledSlots.length * 600) : 0;
+    // Simulated annealing (sama muster mis repairScheduleGlobally's): puhas "ainult parem"
+    // otsing jääb kergesti kohalikku miinimumi kinni (üks vahetus üksi ei paranda,
+    // kuigi kaks koos paranduks) — vahel aktsepteeritakse ka veidi halvemat vahetust,
+    // et sealt välja pääseda, aga meeles peetakse ALATI kõigi aegade parim leitud seis.
+    for (let it = 0; it < iterations && bestViol > 0; it++) {
+      const i = Math.floor(Math.random() * order.length);
+      const j = Math.floor(Math.random() * order.length);
+      if (i === j || assembledSlots[order[i]].length !== assembledSlots[order[j]].length) continue;
+      [order[i], order[j]] = [order[j], order[i]];
+      const v = countAdjacentRests(order);
+      const temperature = 2 * (1 - it / iterations);
+      const accept = v <= curViol || Math.random() < Math.exp(-(v - curViol) / Math.max(0.05, temperature));
+      if (accept) {
+        curViol = v;
+        if (v < bestViol) {
+          bestViol = v;
+          bestOrder = [...order];
+        }
+      } else {
+        [order[i], order[j]] = [order[j], order[i]];
+      }
+    }
+    order = bestOrder;
+  }
+  const bestSlots = order.map((i) => assembledSlots[i]).slice(0, maxSlots);
 
   return bestSlots.map((best) => {
     const activeIds = new Set(best.flat());

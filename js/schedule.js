@@ -90,22 +90,29 @@ export function generateExactRoundRobin({ entities, entityPlayers, courts, maxSl
     const total = roundPairs.length;
     const numFull = Math.floor(total / matchesPerSlot);
     const leftoverHere = total - numFull * matchesPerSlot;
-    if (leftoverHere <= 0) {
-      fullSlots.push(roundPairs);
-      return;
+    // TÄHTIS: isegi kui ülejääki EI jää (leftoverHere===0), ei tohi terve vooru
+    // paare (nt 12) panna ÜHE perioodina, kui matchesPerSlot on väiksem (nt 1 väljak
+    // = 1 mäng perioodi kohta) — see oleks füüsiliselt võimatu (rohkem mänge korraga
+    // kui väljakuid). Nii nagu allpool ülejäägiga voorude puhul, tuleb IGAL juhul
+    // lõigata täpselt matchesPerSlot-suurusteks perioodideks (vt ka kommentaar altpoolt
+    // segamise kohta) — see viga tekitas varem selle, et vähem väljakuid (nt 5) nõudis
+    // JÄRSKU palju rohkem vooru kui rohkem väljakuid (nt 4), mis ei tohiks kunagi juhtuda.
+    let kept = roundPairs;
+    if (leftoverHere > 0) {
+      const scored = roundPairs.map((pair) => ({ pair, score: deferredCount[pair[0]] + deferredCount[pair[1]] }));
+      scored.sort((a, b) => a.score - b.score);
+      scored.slice(0, leftoverHere).forEach(({ pair }) => {
+        deferredCount[pair[0]] += 1;
+        deferredCount[pair[1]] += 1;
+        leftoverPairs.push(pair);
+      });
+      kept = scored.slice(leftoverHere).map((s) => s.pair);
     }
-    const scored = roundPairs.map((pair) => ({ pair, score: deferredCount[pair[0]] + deferredCount[pair[1]] }));
-    scored.sort((a, b) => a.score - b.score);
-    scored.slice(0, leftoverHere).forEach(({ pair }) => {
-      deferredCount[pair[0]] += 1;
-      deferredCount[pair[1]] += 1;
-      leftoverPairs.push(pair);
-    });
     // Sega järjekord enne perioodideks lõikamist ja väljakute-järjekorra jaoks — muidu
     // kipub sama paar (kes harva ülejääki jääb) alati sarnasele positsioonile jääma, mis
     // näitaks teda pidevalt SAMAL väljakul. Sisu (kes kellega ja mis voorus) ei muutu,
     // ainult väljaku-number.
-    const kept = shuffle(scored.slice(leftoverHere).map((s) => s.pair));
+    kept = shuffle(kept);
     for (let i = 0; i + matchesPerSlot <= kept.length; i += matchesPerSlot) {
       fullSlots.push(kept.slice(i, i + matchesPerSlot));
     }

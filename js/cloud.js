@@ -94,6 +94,25 @@ export async function cloudDelete(id) {
   return true;
 }
 
+// Väljakute nimed on seotud KASUTAJA (mitte turniiri) küljes, et neid ei peaks iga
+// uue turniiri juures uuesti sisestama — hoitakse eraldi 'userSettings' kollektsioonis,
+// dokumendi id on kasutaja uid.
+export async function saveCourtNames(names) {
+  if (!isCloudConfigured() || !currentUser) return false;
+  const ctx = await loadContext();
+  const ref = ctx.doc(ctx.db, 'userSettings', currentUser.uid);
+  await ctx.setDoc(ref, { courtNames: names }, { merge: true });
+  return true;
+}
+
+export async function getCourtNames(uid) {
+  if (!isCloudConfigured() || !uid) return [];
+  const ctx = await loadContext();
+  const ref = ctx.doc(ctx.db, 'userSettings', uid);
+  const snap = await ctx.getDoc(ref);
+  return snap.exists() ? snap.data().courtNames || [] : [];
+}
+
 export async function cloudGet(id) {
   if (!isCloudConfigured()) return null;
   const ctx = await loadContext();

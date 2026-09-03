@@ -302,6 +302,7 @@ async function renderHome() {
     try {
       const cloudTournaments = await queryMyTournaments(user.uid);
       State.cacheTournaments(cloudTournaments);
+      await State.syncCourtNamesFromCloud(user.uid);
     } catch (err) {
       console.error('Minu turniiride laadimine ebaõnnestus', err);
     }
@@ -311,8 +312,12 @@ async function renderHome() {
     <div class="card">
       <div class="row-between">
         <h1>Minu turniirid</h1>
-        <button class="btn btn-primary" id="newBtn">+ Loo uus turniir</button>
+        <div class="row-gap">
+          ${user ? `<button class="btn btn-secondary" id="courtNamesBtn">🏟️ Väljakute nimed</button>` : ''}
+          <button class="btn btn-primary" id="newBtn">+ Loo uus turniir</button>
+        </div>
       </div>
+      ${user ? `<div id="courtNamesBox" class="hidden"></div>` : ''}
       ${
         isCloudConfigured() && !user
           ? `<p class="muted small">💡 Logi ülal paremal sisse, et näha oma turniire ka teisest arvutist või telefonist.</p>`
@@ -342,6 +347,15 @@ async function renderHome() {
     </div>
   `;
   document.getElementById('newBtn').addEventListener('click', () => renderSettingsScreen(null));
+  const courtNamesBtn = document.getElementById('courtNamesBtn');
+  if (courtNamesBtn) {
+    courtNamesBtn.addEventListener('click', () => {
+      const box = document.getElementById('courtNamesBox');
+      const isHidden = box.classList.contains('hidden');
+      box.classList.toggle('hidden');
+      if (isHidden) renderCourtNamesEditor(box);
+    });
+  }
   appEl.querySelectorAll('.open-btn').forEach((b) =>
     b.addEventListener('click', () => {
       const t = State.getTournament(b.dataset.id);
@@ -357,6 +371,57 @@ async function renderHome() {
       }
     })
   );
+}
+
+// Väljakute nimede haldus (ainult sisselogitud kasutajale) — nimed käivad kasutaja
+// kontoga kaasas (pilve sünkroonitud), et neid ei peaks iga uue turniiri juures
+// uuesti sisestama. Tühjaks jäetud nimega väljak näitab ajakavas lihtsalt numbrit.
+function renderCourtNamesEditor(box) {
+  let names = State.loadCourtNames();
+  const draw = () => {
+    box.innerHTML = `
+      <div class="card">
+        <h3>Väljakute nimed</h3>
+        <p class="muted small">Anna oma väljakutele nimed (nt "Kesk", "A-väljak") — need jäävad meelde ja kehtivad kõigi tulevaste turniiride ajakavas. Tühjaks jäetud väljak näitab lihtsalt numbrit.</p>
+        <div class="list" id="courtNameRows">
+          ${names
+            .map(
+              (name, i) => `
+            <div class="row-gap">
+              <span class="court-badge">${i + 1}</span>
+              <input type="text" class="court-name-input" data-idx="${i}" value="${escapeHtml(name)}" placeholder="Väljak ${i + 1}" />
+              <button class="btn btn-secondary small remove-court-btn" data-idx="${i}" type="button">✕</button>
+            </div>`
+            )
+            .join('')}
+        </div>
+        <div class="row-gap">
+          <button class="btn btn-secondary" id="addCourtNameBtn" type="button">+ Lisa väljak</button>
+          <button class="btn btn-primary" id="saveCourtNamesBtn" type="button">Salvesta</button>
+        </div>
+      </div>
+    `;
+    box.querySelectorAll('.court-name-input').forEach((inp) =>
+      inp.addEventListener('input', (e) => {
+        names[parseInt(e.target.dataset.idx, 10)] = e.target.value;
+      })
+    );
+    box.querySelectorAll('.remove-court-btn').forEach((b) =>
+      b.addEventListener('click', () => {
+        names.splice(parseInt(b.dataset.idx, 10), 1);
+        draw();
+      })
+    );
+    document.getElementById('addCourtNameBtn').addEventListener('click', () => {
+      names.push('');
+      draw();
+    });
+    document.getElementById('saveCourtNamesBtn').addEventListener('click', () => {
+      State.saveCourtNames(names.map((n) => n.trim()));
+      box.classList.add('hidden');
+    });
+  };
+  draw();
 }
 
 function escapeHtml(s) {
@@ -1014,6 +1079,8 @@ function renderTournamentScreen(t, { readOnly }) {
     roundGroups[roundGroups.length - 1].items.push({ slot, si });
   });
 
+  const courtNames = State.loadCourtNames();
+  const courtLabel = (courtNum) => escapeHtml((courtNames[courtNum - 1] || '').trim() || String(courtNum));
   const matchTable = (slot, si) => `
     <table class="table">
       <thead><tr><th>Väljak</th><th></th><th>Skoor</th><th></th></tr></thead>
@@ -1022,7 +1089,7 @@ function renderTournamentScreen(t, { readOnly }) {
           .map(
             (m, mi) => `
           <tr>
-            <td class="court-badge">${m.court}</td>
+            <td class="court-badge">${courtLabel(m.court)}</td>
             <td class="side">${escapeHtml(sideLabel(t, m.side1))}</td>
             <td class="score-cell">
               ${

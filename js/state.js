@@ -1,9 +1,10 @@
 // Turniiride salvestamine brauseri localStorage'isse (kohalik koopia / "Minu turniirid" nimekiri)
 // ning kui Firebase on seadistatud, ka pilve (et jagamislingid saaksid töötada ja uueneda).
 import { uid } from './util.js';
-import { cloudSave, cloudDelete, isCloudConfigured } from './cloud.js';
+import { cloudSave, cloudDelete, isCloudConfigured, saveCourtNames as cloudSaveCourtNames, getCourtNames as cloudGetCourtNames } from './cloud.js';
 
 const STORAGE_KEY = 'padel_turniirid_v1';
+const COURT_NAMES_KEY = 'padel_court_names_v1';
 
 export function loadAll() {
   try {
@@ -59,6 +60,44 @@ export function cacheTournaments(cloudList) {
   existing.forEach((t) => (byId[t.id] = t));
   cloudList.forEach((t) => (byId[t.id] = t));
   saveAll(Object.values(byId).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)));
+}
+
+// Väljakute nimed: kohalik koopia (kiireks kasutamiseks, töötab ka väljas-logituna
+// samas brauseris) + kui sisse logitud, ka pilve sünkroon (et nimed käiksid kasutaja
+// kontoga kaasas, mitte poleks seotud ühe kindla arvuti/brauseriga).
+export function loadCourtNames() {
+  try {
+    const raw = localStorage.getItem(COURT_NAMES_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+export function saveCourtNames(names) {
+  localStorage.setItem(COURT_NAMES_KEY, JSON.stringify(names));
+  if (isCloudConfigured()) {
+    cloudSaveCourtNames(names).catch((err) => {
+      console.error('Väljakute nimede pilve salvestamine ebaõnnestus', err);
+      window.dispatchEvent(new CustomEvent('cloud-error', { detail: err.message }));
+    });
+  }
+}
+
+// Loeb sisselogimisel pilvest väljakute nimed ja uuendab kohalikku koopiat — nii
+// näeb kasutaja oma nimesid ka teisest arvutist/telefonist sisse logides.
+export async function syncCourtNamesFromCloud(uid) {
+  if (!isCloudConfigured() || !uid) return loadCourtNames();
+  try {
+    const cloudNames = await cloudGetCourtNames(uid);
+    if (cloudNames && cloudNames.length) {
+      localStorage.setItem(COURT_NAMES_KEY, JSON.stringify(cloudNames));
+      return cloudNames;
+    }
+  } catch (err) {
+    console.error('Väljakute nimede pilvest laadimine ebaõnnestus', err);
+  }
+  return loadCourtNames();
 }
 
 export function newTournament(settings, playerInputs) {

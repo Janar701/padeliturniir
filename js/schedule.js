@@ -660,6 +660,81 @@ function repairScheduleGlobally(slots, n, players) {
     bestSnapshot.forEach((arr, i) => { roundArrays[i] = arr; });
   }
 
+  // Lisapööre: kordumiste ARV (ülal juba minimeeritud) ei ütle midagi selle kohta,
+  // KUS ajas need kordused asuvad — kaks kohtumist SAMAS ROLLIS (kaks korda paariline,
+  // või kaks korda vastane) KÕRVUTI voorudes tundub mängija jaoks palju hullem kui
+  // täpselt sama kordus laiali hajutatuna kogu turniiri peale. (Paariline-siis-vastane
+  // pole siin sihitud — rollivahetus ei tunnu "sama asi jälle", ja selliseid kõrvutisi
+  // juhtub 16 mängija/7 vooru juures paratamatult palju, sest võimalikke paare on vähe
+  // võrreldes mängude arvuga — neid kõiki liigutada üritada teeks rohkem kahju kui kasu.)
+  // Igale leitud kõrvuti-kordusele antud arv katseid; kui üht ei õnnestu ilma
+  // üldist tasakaalu (badness) halvendamata liigutada, jäetakse SEE üks paar rahule
+  // ja jätkatakse ülejäänutega — üks lahendamatu juhtum ei tohi takistada teiste parandamist.
+  {
+    const findAdjacentSameRoleClusters = () => {
+      const occurrences = {}; // 'partner|x|y' / 'opp|x|y' -> idxs[]
+      roundArrays.forEach((arr, ri) => {
+        const { partners, opponents } = roundPairs(arr);
+        partners.forEach(([x, y]) => {
+          const k = 'p|' + pairKey(x, y);
+          (occurrences[k] = occurrences[k] || { x, y, idxs: [] }).idxs.push(ri);
+        });
+        opponents.forEach(([x, y]) => {
+          const k = 'o|' + pairKey(x, y);
+          (occurrences[k] = occurrences[k] || { x, y, idxs: [] }).idxs.push(ri);
+        });
+      });
+      const clusters = [];
+      Object.values(occurrences).forEach(({ x, y, idxs }) => {
+        for (let i = 0; i < idxs.length - 1; i++) {
+          if (idxs[i + 1] - idxs[i] <= 1) clusters.push({ x, y, ri: idxs[i], rj: idxs[i + 1] });
+        }
+      });
+      return clusters;
+    };
+
+    const gaveUp = new Set(); // pairKey(x,y) — ei üritata enam, et vältida lõputut kordust
+    let guard = 0;
+    while (guard < 100) {
+      guard++;
+      const clusters = findAdjacentSameRoleClusters().filter((c) => !gaveUp.has(pairKey(c.x, c.y)));
+      if (!clusters.length) break; // kõik kõrvutised kas lahendatud või juba proovitud
+      const { x, y, ri, rj } = clusters[0];
+      const arrI = roundArrays[ri];
+      const targetPlayer = arrI.includes(x) ? x : y;
+      const pi = arrI.indexOf(targetPlayer);
+      let fixed = false;
+      for (let attempt = 0; attempt < 40 && !fixed; attempt++) {
+        const rk = Math.floor(Math.random() * numRounds);
+        if (rk === ri || rk === rj) continue; // ei aita, kui liigub lihtsalt teise kõrvutisesse vooru
+        const arrK = roundArrays[rk];
+        if (!arrK.length) continue;
+        const pk = Math.floor(Math.random() * arrK.length);
+        const B = arrK[pk];
+        if (arrI.includes(B) || arrK.includes(targetPlayer)) continue; // kumbki ei tohi sihtvoorus juba mängida
+        const beforeBadness = globalBadness();
+        applyCounts(arrI, -1);
+        applyCounts(arrK, -1);
+        arrI[pi] = B;
+        arrK[pk] = targetPlayer;
+        applyCounts(arrI, 1);
+        applyCounts(arrK, 1);
+        const afterBadness = globalBadness();
+        if (afterBadness <= beforeBadness) {
+          fixed = true;
+        } else {
+          applyCounts(arrI, -1);
+          applyCounts(arrK, -1);
+          arrI[pi] = targetPlayer;
+          arrK[pk] = B;
+          applyCounts(arrI, 1);
+          applyCounts(arrK, 1);
+        }
+      }
+      if (!fixed) gaveUp.add(pairKey(x, y)); // seda paari ei õnnestunud liigutada — jäta rahule, jätka teistega
+    }
+  }
+
   // Kirjuta parandatud kohad tagasi slots struktuuri (samad väljakud, uued kokkupanekud).
   // TÄHTIS: kohavahetus võib muuta, KES on üldse sel voorul aktiivne (mängija, kes oli
   // enne puhkamas, võib nüüd olla mängus, ja vastupidi) — seepärast tuleb "resting"

@@ -1104,7 +1104,7 @@ function renderTournamentScreen(t, { readOnly }) {
         <h2>Ajakava</h2>
         ${slotsHtml}
       </div>
-      <div class="card">
+      <div class="card sticky-card">
         <h2>Pingerida</h2>
         ${standingsHtml}
       </div>

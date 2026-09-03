@@ -222,6 +222,21 @@ input[type="number"] { max-width: 140px; }
   .two-col { grid-template-columns: 1fr; }
 }
 
+/* Pingerida jääb allakerimisel paigale (kohe päise all), et seda saaks jälgida ilma
+   pidevalt üles kerimata — ainult laiemal ekraanil, kus Ajakava ja Pingerida on
+   kõrvuti; kitsal ekraanil (üksteise all) ei oleks "paigalseismine" mõttekas. Kui
+   pingerida ise on ekraanist kõrgem, kerib see omaette (max-height + overflow), mitte
+   ei lükka lehte laiali. */
+.sticky-card {
+  position: sticky;
+  top: 97px;
+  max-height: calc(100vh - 113px);
+  overflow-y: auto;
+}
+@media (max-width: 900px) {
+  .sticky-card { position: static; max-height: none; overflow-y: visible; }
+}
+
 .table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
 .table th, .table td { padding: 8px 6px; border-bottom: 1px solid var(--border); text-align: left; }
 .table th { color: var(--muted); font-weight: 600; font-size: 0.78rem; text-transform: uppercase; }

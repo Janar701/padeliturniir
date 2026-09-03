@@ -1009,17 +1009,18 @@ export function estimateAmericanoPartnerRoundsNeeded(playerCount, courts) {
 //
 // ROHKEM VOORE ON TÄHTSAM KUI PIKEM MÄNG: rohkem voore tähendab rohkem erinevaid
 // paarilisi ja vastaseid, mis on mängijatele olulisem kui mugavam, aga vähem
-// varieeruvusega pikem mäng. Seepärast proovitakse KÕIKI mänguaegu 12-20 min
+// varieeruvusega pikem mäng. Seepärast proovitakse KÕIKI mänguaegu 11-20 min
 // vahemikus ja valitakse see, mis annab kõige ROHKEM päriselt mängitud voore
 // (vt resolveExactRoundPlan, kus võrdsuse tagamiseks võib mõni voor olla 1 minut
-// lühem — väljak ei jää kunagi tühjaks) — see toob praktikas peaaegu alati 12-14 min
-// mängu, sest lühem mäng mahutab rohkem voore. "fullCoverage" (kas kõik jõuavad
-// kõigiga paariliseks) on siin ainult INFO kuvamiseks, mitte peatumistingimus.
+// lühem — väljak ei jää kunagi tühjaks) — see toob praktikas peaaegu alati 11-13 min
+// mängu, sest lühem mäng mahutab rohkem voore. Alampiir on 11 min, sama mis
+// paarismängul (vt listRelaxedMatchOptions kommentaari). "fullCoverage" (kas kõik
+// jõuavad kõigiga paariliseks) on siin ainult INFO kuvamiseks, mitte peatumistingimus.
 export function pickAmericanoMatchMinutes({ tournamentMinutes, pauseMinutes, playerCount, courts }) {
   const roundsNeeded = estimateAmericanoPartnerRoundsNeeded(playerCount, courts);
-  const options = computeMatchOptions({ n: playerCount, unitSize: 4, courts, tournamentMinutes, pauseMinutes, mmMin: 12, mmMax: 20 });
+  const options = computeMatchOptions({ n: playerCount, unitSize: 4, courts, tournamentMinutes, pauseMinutes, mmMin: 11, mmMax: 20 });
   const best = options[0] || null;
-  if (!best) return { matchMinutes: 12, rounds: 0, lastRoundCapacity: 0, shortenedCount: 0, fullCoverage: false };
+  if (!best) return { matchMinutes: 11, rounds: 0, lastRoundCapacity: 0, shortenedCount: 0, fullCoverage: false };
   return {
     matchMinutes: best.matchMinutes,
     rounds: best.rounds,
@@ -1032,7 +1033,7 @@ export function pickAmericanoMatchMinutes({ tournamentMinutes, pauseMinutes, pla
 // Sama, aga tagastab KUNI 5 kehtivat valikut (mitte ainult ühte "parimat"), et kasutaja
 // saaks ise valida mänguaja/voorude-arvu kombinatsiooni vahel seadete ekraanil.
 export function listAmericanoMatchOptions({ tournamentMinutes, pauseMinutes, playerCount, courts }) {
-  const options = computeMatchOptions({ n: playerCount, unitSize: 4, courts, tournamentMinutes, pauseMinutes, mmMin: 12, mmMax: 20 });
+  const options = computeMatchOptions({ n: playerCount, unitSize: 4, courts, tournamentMinutes, pauseMinutes, mmMin: 11, mmMax: 20 });
   return options.slice(0, 5);
 }
 

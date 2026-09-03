@@ -718,7 +718,7 @@ function renderSettingsScreen(existing) {
       }
     } else {
       // Üksikmäng = Americano: mängitakse alati 2 vs 2, paarilised ja vastased loositakse
-      // iga vooru uuesti. Mängu pikkus jääb 12-20 min vahemikku, vähemalt 4 mängijat vajalik.
+      // iga vooru uuesti. Mängu pikkus jääb 11-20 min vahemikku, vähemalt 4 mängijat vajalik.
       if (entityCount < 4) {
         computedMatchMinutes = 0;
         box.innerHTML = `<span class="error">Üksikmängus (2 vs 2, paarilised loositakse) on vaja vähemalt 4 mängijat.</span>`;

@@ -33,11 +33,14 @@ service cloud.firestore {
     match /tournaments/{tournamentId} {
       allow read, write: if true;
     }
+    match /userSettings/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
   }
 }
 ```
 
-**Oluline aus märkus turvalisuse kohta:** need reeglid on meelega lihtsad — igaüks, kes teab (või ära arvab) turniiri ID-d, saab seda ka muuta, mitte ainult vaadata. Kaitse tugineb sellele, et turniiri ID on juhuslik ja praktiliselt äraarvamatu string (samasugune usaldusmudel nagu "kõik lingiga saavad muuta" Google Docsis). See sobib hästi sõprade/kogukonna turniiri jaoks, aga ära kasuta seda tundliku info jaoks.
+**Oluline aus märkus turvalisuse kohta:** `tournaments` reeglid on meelega lihtsad — igaüks, kes teab (või ära arvab) turniiri ID-d, saab seda ka muuta, mitte ainult vaadata. Kaitse tugineb sellele, et turniiri ID on juhuslik ja praktiliselt äraarvamatu string (samasugune usaldusmudel nagu "kõik lingiga saavad muuta" Google Docsis). See sobib hästi sõprade/kogukonna turniiri jaoks, aga ära kasuta seda tundliku info jaoks. `userSettings` (nt väljakute nimed) on rangemalt kaitstud — ainult sisselogitud kasutaja ise saab oma andmeid lugeda/kirjutada.
 
 ### 3. Registreeri veebirakendus ja kopeeri seadistus
 

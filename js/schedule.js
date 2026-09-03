@@ -153,9 +153,17 @@ export function generateExactRoundRobin({ entities, entityPlayers, courts, maxSl
   let bestScore = Infinity;
   for (let oa = 0; oa < outerAttempts && leftoverPairs.length; oa++) {
     const candidate = attemptOnce();
-    const partial = candidate.filter((s) => s.length < matchesPerSlot).length;
+    const partialSizes = candidate.filter((s) => s.length < matchesPerSlot).map((s) => s.length);
+    const partial = partialSizes.length;
     const waste = candidate.reduce((sum, s) => sum + (matchesPerSlot - s.length), 0);
-    const score = candidate.length * 1000 + partial * 10 + waste;
+    // Eelista sama koguperioodide arvu ja jäätme (waste) juures VÄHEM ÄÄRMUSLIKKU
+    // osalist perioodi (nt kaks poolikut 2/3-täidetud perioodi on parem kui üks
+    // peaaegu-tühi 1/3 + üks täis) — väga väike lõpp-periood sunnib matemaatiliselt
+    // (auke-lahter/pigeonhole) paljusid osalisi kaheks järjestikuseks vooruks puhkama
+    // ükskõik kuidas perioode hiljem ümber järjestada.
+    const minPartial = partialSizes.length ? Math.min(...partialSizes) : matchesPerSlot;
+    const sparsePenalty = partialSizes.length ? (matchesPerSlot - minPartial) * 3 : 0;
+    const score = candidate.length * 1000 + partial * 10 + waste + sparsePenalty;
     if (score < bestScore) {
       bestScore = score;
       bestLeftoverSlots = candidate;
@@ -176,37 +184,59 @@ export function generateExactRoundRobin({ entities, entityPlayers, courts, maxSl
     const active = new Set(period.flat());
     return entities.filter((id) => !active.has(id));
   });
-  const countAdjacentRests = (order) => {
+  const restSetObjs = restSets.map((arr) => new Set(arr));
+  // Ühe "piiri" (kaks kõrvutist perioodi ord[pos] ja ord[pos+1]) kattuvate puhkajate arv —
+  // O(puhkajate arv), MITTE kogu ajakava pikkuses. Täisvahetuse (swap) järel muutub
+  // ainult MÕNI selline piir (need, mis puudutavad vahetatud positsioone), seega piisab
+  // ainult nende ümberarvutamisest, mitte kogu ajakava uuesti läbimisest — see teeb
+  // otsingu suurte turniiride (palju voore) jaoks palju kiiremaks.
+  const boundaryViol = (ord, pos) => {
+    const a = restSets[ord[pos]];
+    const bSet = restSetObjs[ord[pos + 1]];
     let v = 0;
-    for (let i = 0; i < order.length - 1; i++) {
-      const a = restSets[order[i]];
-      const bSet = new Set(restSets[order[i + 1]]);
-      a.forEach((id) => { if (bSet.has(id)) v++; });
-    }
+    a.forEach((id) => { if (bSet.has(id)) v++; });
+    return v;
+  };
+  const totalViol = (ord) => {
+    let v = 0;
+    for (let p = 0; p < ord.length - 1; p++) v += boundaryViol(ord, p);
     return v;
   };
   let order = assembledSlots.map((_, i) => i);
-  let curViol = countAdjacentRests(order);
+  let curViol = totalViol(order);
   let bestViol = curViol;
   if (bestViol > 0 && assembledSlots.length > 2) {
     let bestOrder = [...order];
-    const sameSizeSwappable = assembledSlots.length <= 60;
-    const iterations = sameSizeSwappable ? Math.min(60000, assembledSlots.length * assembledSlots.length * 600) : 0;
+    const iterations = Math.min(400000, assembledSlots.length * assembledSlots.length * 400);
+    // Kui matemaatiliselt parem tulemus pole enam saavutatav (nt turniiri lõpus on
+    // periood väga väheste mängudega — siis peavad mõned puhkajad paratamatult ka
+    // naaberperioodil puhkama, "auke pigeon-hole" reeglist), ei tasu kogu iteratsioonide
+    // eelarvet ära kulutada — kui pikk aeg pole parandust andnud, katkesta varakult.
+    const stallLimit = Math.max(15000, assembledSlots.length * 500);
+    let sinceImprovement = 0;
     // Simulated annealing (sama muster mis repairScheduleGlobally's): puhas "ainult parem"
     // otsing jääb kergesti kohalikku miinimumi kinni (üks vahetus üksi ei paranda,
     // kuigi kaks koos paranduks) — vahel aktsepteeritakse ka veidi halvemat vahetust,
     // et sealt välja pääseda, aga meeles peetakse ALATI kõigi aegade parim leitud seis.
-    for (let it = 0; it < iterations && bestViol > 0; it++) {
+    for (let it = 0; it < iterations && bestViol > 0 && sinceImprovement < stallLimit; it++) {
+      sinceImprovement++;
       const i = Math.floor(Math.random() * order.length);
       const j = Math.floor(Math.random() * order.length);
       if (i === j || assembledSlots[order[i]].length !== assembledSlots[order[j]].length) continue;
+      const affected = new Set([i - 1, i, j - 1, j].filter((p) => p >= 0 && p < order.length - 1));
+      let before = 0;
+      affected.forEach((p) => { before += boundaryViol(order, p); });
       [order[i], order[j]] = [order[j], order[i]];
-      const v = countAdjacentRests(order);
+      let after = 0;
+      affected.forEach((p) => { after += boundaryViol(order, p); });
+      const delta = after - before;
+      const v = curViol + delta;
       const temperature = 2 * (1 - it / iterations);
-      const accept = v <= curViol || Math.random() < Math.exp(-(v - curViol) / Math.max(0.05, temperature));
+      const accept = delta <= 0 || Math.random() < Math.exp(-delta / Math.max(0.05, temperature));
       if (accept) {
         curViol = v;
         if (v < bestViol) {
+          sinceImprovement = 0;
           bestViol = v;
           bestOrder = [...order];
         }
@@ -615,8 +645,6 @@ function repairScheduleGlobally(slots, n, players) {
   const numRounds = roundArrays.length;
   if (numRounds < 2) return;
 
-  const partnerCount = {};
-  const opponentCount = {};
   const roundPairs = (arr) => {
     const partners = [];
     for (let g = 0; g < arr.length; g += 2) partners.push([arr[g], arr[g + 1]]);
@@ -628,20 +656,42 @@ function repairScheduleGlobally(slots, n, players) {
     }
     return { partners, opponents };
   };
+  // TÄHTIS (jõudlus): see on kõige kuumem koodilõik — kutsutakse kuni 8 korda IGA
+  // SA iteratsiooni kohta (kuni 1.2M korda kokku suuremate mängijate arvude juures).
+  // pairKey() stringide kokkupanek + massiivide allokeerimine IGAL kutsel tegi
+  // suuremate turniiride (nt 20 mängijat) ajakava loomise mitmekümne sekundi pikkuseks.
+  // Siin kasutatakse mängija-id (string) asemel täisarvulist indeksit (0..n-1) ja
+  // tavalise objekti asemel Int32Array't — täisarvuline massiivi-indeks on stringi-
+  // võtmega hashmap'ist kordades kiirem ega vaja vahepealseid massiive/stringe.
+  const idxOf = {};
+  players.forEach((p, i) => { idxOf[p] = i; });
+  const partnerCount = new Int32Array(n * n);
+  const opponentCount = new Int32Array(n * n);
+  const pIdx = (x, y) => {
+    const a = idxOf[x], b = idxOf[y];
+    return a < b ? a * n + b : b * n + a;
+  };
+  const forEachPartnerIdx = (arr, fn) => {
+    for (let g = 0; g < arr.length; g += 2) fn(pIdx(arr[g], arr[g + 1]));
+  };
+  const forEachOpponentIdx = (arr, fn) => {
+    for (let g = 0; g < arr.length; g += 4) {
+      const a1 = arr[g], a2 = arr[g + 1], b1 = arr[g + 2], b2 = arr[g + 3];
+      fn(pIdx(a1, b1)); fn(pIdx(a1, b2)); fn(pIdx(a2, b1)); fn(pIdx(a2, b2));
+    }
+  };
   const roundScore = (arr) => {
-    const { partners, opponents } = roundPairs(arr);
     let s = 0;
-    partners.forEach(([x, y]) => { s += (partnerCount[pairKey(x, y)] || 0) ** 2 * 3; });
+    forEachPartnerIdx(arr, (k) => { const c = partnerCount[k]; s += c * c * 3; });
     // Kuup (mitte ruut) — vt scheduleBadness kommentaari: nii "maksab" iga JÄRGMINE
     // kordus sama vastasega palju rohkem kui eelmine, mis suunab otsingu tugevalt
     // eelistama VÄRSKET vastast, kui üks on veel valimata (mitte lihtsalt "vähem halba").
-    opponents.forEach(([x, y]) => { s += (opponentCount[pairKey(x, y)] || 0) ** 3; });
+    forEachOpponentIdx(arr, (k) => { const c = opponentCount[k]; s += c * c * c; });
     return s;
   };
   const applyCounts = (arr, delta) => {
-    const { partners, opponents } = roundPairs(arr);
-    partners.forEach(([x, y]) => { const k = pairKey(x, y); partnerCount[k] = (partnerCount[k] || 0) + delta; });
-    opponents.forEach(([x, y]) => { const k = pairKey(x, y); opponentCount[k] = (opponentCount[k] || 0) + delta; });
+    forEachPartnerIdx(arr, (k) => { partnerCount[k] += delta; });
+    forEachOpponentIdx(arr, (k) => { opponentCount[k] += delta; });
   };
   roundArrays.forEach((arr) => applyCounts(arr, 1));
 
@@ -687,6 +737,11 @@ function repairScheduleGlobally(slots, n, players) {
   // aegade parim leitud seis (mitte lihtsalt see, millega otsing lõpeb).
   const iterations = Math.min(600000, Math.max(50000, n * n * 1000));
   const checkEvery = Math.max(500, Math.floor(iterations / 100));
+  // Kui pikk aeg (palju kontrollpunkte järjest) pole parandust andnud, on otsing
+  // tõenäoliselt juba lakanud (kohalik/globaalne miinimum leitud) — ei tasu suuremate
+  // mängijate arvude juures kogu iteratsioonide eelarvet lõpuni ära kulutada.
+  const stallChecksLimit = 8;
+  let checksSinceImprovement = 0;
   for (let it = 0; it < iterations; it++) {
     const temperature = 3 * (1 - it / iterations);
     const ri = Math.floor(Math.random() * numRounds);
@@ -737,7 +792,11 @@ function repairScheduleGlobally(slots, n, players) {
       if (badness < bestBadness) {
         bestBadness = badness;
         bestSnapshot = roundArrays.map((arr) => [...arr]);
+        checksSinceImprovement = 0;
         if (badness === 0) break; // kõik on juba kõigiga kohtunud — parem ei saagi
+      } else {
+        checksSinceImprovement += 1;
+        if (checksSinceImprovement >= stallChecksLimit) break;
       }
     }
   }

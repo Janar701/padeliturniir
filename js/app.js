@@ -514,6 +514,7 @@ function renderSettingsScreen(existing) {
         <div class="field">
           <label>Mängu pikkus ${infoIcon('Arvutatakse automaatselt turniiri pikkuse, pausi, väljakute ja mängijate arvu järgi, nii et kõik jõuaksid kõigiga mängida.')}</label>
           <div id="computedMatchBox" class="computed-box"></div>
+          <p class="muted small" id="matchCoverageHint"></p>
         </div>
         <div class="field">
           <label>Turniiri algus, 24h kellaaeg ${infoIcon('Millal esimene voor algab (nt pealelõunal kell üks = 13:00). Kasutatakse voorude alguse/lõpu aegade ja mänguaja lõppemise märguande jaoks.')}</label>
@@ -589,6 +590,8 @@ function renderSettingsScreen(existing) {
           ? `Praeguse mängijate arvuga mahub korraga käima ainult ${usableCourts} väljak${usableCourts === 1 ? '' : 'ut'} — ülejäänud jääksid mängude ajal tühjaks.`
           : '';
     }
+    const matchCoverageHint = document.getElementById('matchCoverageHint');
+    if (matchCoverageHint) matchCoverageHint.textContent = '';
     if (entityCount < 2 || courts < 1 || tournamentMinutes < 1) {
       computedMatchMinutes = 0;
       box.innerHTML = `<span class="muted">Täida enne teised väljad</span>`;
@@ -629,6 +632,16 @@ function renderSettingsScreen(existing) {
           // (nt kõige rohkem voore) oleks täieliku katvuse tegelikult juba saavutanud.
           const roundsNeeded = Schedule.estimateRoundsForFullCoverage(entityCount, courts);
           const tail = (opt) => (opt.rounds >= roundsNeeded ? ', kõik paarid jõuavad kõigiga mängida' : ' — liiga palju paare, et kõik jõuaksid kõigiga mängida');
+          // Kui KOGU voorude-arv (mitte väljakute arv) on täieliku katvuse takistuseks —
+          // st iga väljakute arv annaks sama "ei jõua" tulemuse, sest täpne ring-turniir
+          // vajab alati sama arvu voore (rounds) sõltumata väljakute arvust — selgita
+          // seda otse, muidu tundub kasutajale (õigustatult), et miski on katki, kuna
+          // väljakute arvu muutmine ei aita kunagi (vt "kui panen pausi 2minutiks" juhtum).
+          const bestOfferedRounds = options[0] ? options[0].rounds : 0;
+          if (bestOfferedRounds < rounds && matchCoverageHint) {
+            const idealTotal = rounds * 11 + (rounds - 1) * pauseMinutes;
+            matchCoverageHint.textContent = `Täieliku katvuse jaoks (iga paar mängib kõigi ${entityCount - 1} ülejäänud paariga) oleks vaja ${rounds} vooru, mis 11 min/mäng ja ${pauseMinutes} min pausiga võtaks ${idealTotal} min — rohkem kui praegu turniiriks planeeritud ${tournamentMinutes} min. Väljakute arvu muutmine seda ei aita (voorude arv ei sõltu väljakutest, kui neid on juba piisavalt) — pikenda turniiri või lühenda pausi, kui tahad täielikku katvust.`;
+          }
           renderMatchOptionsRadios(box, options, 2, fullMatchesPerSlot, tail, (opt) => {
             computedMatchMinutes = opt.matchMinutes;
             computedGroupRounds = opt.rounds;

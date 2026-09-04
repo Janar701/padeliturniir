@@ -471,43 +471,72 @@ async function renderAdminScreen() {
 
   const tournamentsByUid = {};
   tournaments.forEach((t) => {
-    const key = t.ownerUid || '(teadmata)';
+    const key = t.ownerUid || '__anon__';
     (tournamentsByUid[key] = tournamentsByUid[key] || []).push(t);
   });
-  const sortedUsers = [...users].sort((a, b) => (b.lastActiveAt || 0) - (a.lastActiveAt || 0));
+  const usersByUid = {};
+  users.forEach((u) => { usersByUid[u.id] = u; });
 
-  const userCards = sortedUsers
-    .map((u) => {
-      const userTournaments = (tournamentsByUid[u.id] || []).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  // TÄHTIS: koonda KÕIK teadaolevad kasutaja-UID-d, mitte ainult need, kellel juba
+  // on userSettings kirje — kasutaja, kes logis sisse ENNE kasutuse jälgimise
+  // lisamist (või kelle esimene külastus veel salvestamata), on ownerUid kaudu
+  // turniiridega olemas, aga tal pole (veel) userSettings dokumenti. Kui vaataks
+  // ainult userSettings nimekirja, kaoksid tema turniirid vaikselt ära (täpselt see
+  // viga, mis algversioonis oli — 67 turniiri, aga ainult 1 kasutaja nähtaval).
+  const knownUids = new Set([...Object.keys(usersByUid), ...Object.keys(tournamentsByUid).filter((k) => k !== '__anon__')]);
+  const knownEntries = [...knownUids].map((uidKey) => {
+    const u = usersByUid[uidKey] || null;
+    const userTournaments = (tournamentsByUid[uidKey] || []).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    return { uid: uidKey, user: u, tournaments: userTournaments };
+  });
+  knownEntries.sort((a, b) => {
+    const aTime = (a.user && a.user.lastActiveAt) || (a.tournaments[0] && a.tournaments[0].createdAt) || 0;
+    const bTime = (b.user && b.user.lastActiveAt) || (b.tournaments[0] && b.tournaments[0].createdAt) || 0;
+    return bTime - aTime;
+  });
+  const anonTournaments = (tournamentsByUid['__anon__'] || []).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+  const tournamentTableHtml = (list) => `
+    <table class="table">
+      <thead><tr><th>Turniir</th><th>Loodud</th><th>Staatus</th></tr></thead>
+      <tbody>
+        ${list
+          .map(
+            (t) => `<tr>
+              <td>${escapeHtml(t.name || '')}</td>
+              <td>${fmtDateTime(t.createdAt)}</td>
+              <td>${isTournamentCompleted(t) ? '✅ Lõpetatud' : t.phase === 'done' ? '🏁 Märgitud lõppenuks' : '⏳ Pooleli'}</td>
+            </tr>`
+          )
+          .join('')}
+      </tbody>
+    </table>`;
+
+  const userCards = knownEntries
+    .map(({ uid: uidKey, user: u, tournaments: userTournaments }) => {
       const completedCount = userTournaments.filter(isTournamentCompleted).length;
-      const label = u.displayName || u.email || u.id;
+      const label = u ? u.displayName || u.email || uidKey : `Tundmatu kasutaja (${uidKey})`;
+      const activityLine = u
+        ? `Viimati aktiivne: ${fmtDateTime(u.lastActiveAt)} · Külastusi: ${u.visitCount || 0} · Turniire: ${userTournaments.length} (lõpetatud ${completedCount})`
+        : `Kasutuse jälgimist pole (logis sisse enne selle lisamist) · Turniire: ${userTournaments.length} (lõpetatud ${completedCount})`;
       return `
         <div class="card">
           <div>
-            <strong>${escapeHtml(label)}</strong>${u.email && u.displayName ? `<span class="muted small"> · ${escapeHtml(u.email)}</span>` : ''}
-            <div class="muted small">Viimati aktiivne: ${fmtDateTime(u.lastActiveAt)} · Külastusi: ${u.visitCount || 0} · Turniire: ${userTournaments.length} (lõpetatud ${completedCount})</div>
+            <strong>${escapeHtml(label)}</strong>${u && u.email && u.displayName ? `<span class="muted small"> · ${escapeHtml(u.email)}</span>` : ''}
+            <div class="muted small">${activityLine}</div>
           </div>
-          ${
-            userTournaments.length
-              ? `<table class="table">
-                  <thead><tr><th>Turniir</th><th>Loodud</th><th>Staatus</th></tr></thead>
-                  <tbody>
-                    ${userTournaments
-                      .map(
-                        (t) => `<tr>
-                          <td>${escapeHtml(t.name || '')}</td>
-                          <td>${fmtDateTime(t.createdAt)}</td>
-                          <td>${isTournamentCompleted(t) ? '✅ Lõpetatud' : t.phase === 'done' ? '🏁 Märgitud lõppenuks' : '⏳ Pooleli'}</td>
-                        </tr>`
-                      )
-                      .join('')}
-                  </tbody>
-                </table>`
-              : `<p class="muted small">Ühtegi turniiri veel loodud.</p>`
-          }
+          ${userTournaments.length ? tournamentTableHtml(userTournaments) : `<p class="muted small">Ühtegi turniiri veel loodud.</p>`}
         </div>`;
     })
     .join('');
+
+  const anonCard = anonTournaments.length
+    ? `<div class="card">
+        <strong>Sisselogimata kasutajad</strong>
+        <div class="muted small">Need turniirid on loodud ilma sisse logimata — kasutajat ei saa tuvastada. Turniire: ${anonTournaments.length} (lõpetatud ${anonTournaments.filter(isTournamentCompleted).length})</div>
+        ${tournamentTableHtml(anonTournaments)}
+      </div>`
+    : '';
 
   appEl.innerHTML = `
     <div class="card">
@@ -515,8 +544,9 @@ async function renderAdminScreen() {
         <h1>Admin — kasutuse jälgimine</h1>
         <button class="btn btn-secondary" id="backHomeBtn">← Tagasi</button>
       </div>
-      <p class="muted small">${sortedUsers.length} kasutajat, ${tournaments.length} turniiri kokku.</p>
+      <p class="muted small">${knownEntries.length} teadaolevat kasutajat${anonTournaments.length ? ` + sisselogimata turniirid` : ''}, ${tournaments.length} turniiri kokku.</p>
     </div>
+    ${anonCard}
     ${userCards}
   `;
   document.getElementById('backHomeBtn').addEventListener('click', () => renderHome());

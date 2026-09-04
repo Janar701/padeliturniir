@@ -18,12 +18,12 @@ function loadContext() {
   if (!ctxPromise) {
     ctxPromise = (async () => {
       const { initializeApp } = await import(`https://www.gstatic.com/firebasejs/${SDK_VERSION}/firebase-app.js`);
-      const { getFirestore, doc, setDoc, getDoc, deleteDoc, onSnapshot, collection, query, where, getDocs } = await import(
+      const { getFirestore, doc, setDoc, getDoc, deleteDoc, onSnapshot, collection, query, where, getDocs, increment } = await import(
         `https://www.gstatic.com/firebasejs/${SDK_VERSION}/firebase-firestore.js`
       );
       const app = initializeApp(firebaseConfig);
       const db = getFirestore(app);
-      return { app, db, doc, setDoc, getDoc, deleteDoc, onSnapshot, collection, query, where, getDocs };
+      return { app, db, doc, setDoc, getDoc, deleteDoc, onSnapshot, collection, query, where, getDocs, increment };
     })();
   }
   return ctxPromise;
@@ -111,6 +111,44 @@ export async function getCourtNames(uid) {
   const ref = ctx.doc(ctx.db, 'userSettings', uid);
   const snap = await ctx.getDoc(ref);
   return snap.exists() ? snap.data().courtNames || [] : [];
+}
+
+// Märgib "kasutaja oli äpis aktiivne" — kutsutakse kodulehe laadimisel, kui keegi
+// on sisse logitud. Salvestub samasse 'userSettings' dokumenti (nimi ja email
+// juurde, et admin-vaates saaks kasutajat ID asemel nime järgi tuvastada).
+export async function recordUsage(user) {
+  if (!isCloudConfigured() || !user) return false;
+  const ctx = await loadContext();
+  const ref = ctx.doc(ctx.db, 'userSettings', user.uid);
+  await ctx.setDoc(
+    ref,
+    {
+      displayName: user.displayName || null,
+      email: user.email || null,
+      lastActiveAt: Date.now(),
+      visitCount: ctx.increment(1),
+    },
+    { merge: true }
+  );
+  return true;
+}
+
+// Ainult adminile: kõik kasutajate 'userSettings' dokumendid korraga (kasutuse
+// jälgimiseks) — turvareeglid lubavad seda lugeda ainult määratud admin-kontol.
+export async function getAllUserSettings() {
+  if (!isCloudConfigured()) return [];
+  const ctx = await loadContext();
+  const snap = await ctx.getDocs(ctx.collection(ctx.db, 'userSettings'));
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+}
+
+// Ainult adminile: KÕIK turniirid (mitte ainult enda omad) — kasutatakse kasutuse
+// jälgimise vaates, et näidata, mitu turniiri igaüks lõi ja kas need lõpuni mängiti.
+export async function getAllTournaments() {
+  if (!isCloudConfigured()) return [];
+  const ctx = await loadContext();
+  const snap = await ctx.getDocs(ctx.collection(ctx.db, 'tournaments'));
+  return snap.docs.map((d) => d.data());
 }
 
 export async function cloudGet(id) {

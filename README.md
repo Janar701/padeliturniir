@@ -34,7 +34,10 @@ service cloud.firestore {
       allow read, write: if true;
     }
     match /userSettings/{userId} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
+      // Admin-konto (kasutuse jälgimise vaade) saab lugeda KÕIKI kasutajate
+      // dokumente, kõik teised näevad/kirjutavad ainult enda oma.
+      allow read: if request.auth != null && (request.auth.uid == userId || request.auth.token.email == 'janar.meho@gmail.com');
+      allow write: if request.auth != null && request.auth.uid == userId;
     }
   }
 }

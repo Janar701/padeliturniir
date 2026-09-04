@@ -2,10 +2,13 @@ import * as State from './state.js';
 import * as Schedule from './schedule.js';
 import { computeStandings, computeTeamStandings, computeScheduledCounts, computeTeamScheduledCounts, findLeaderWithTieInfo, methodLabel } from './standings.js';
 import { buildViewUrl, buildEditUrl, parseShareHash } from './share.js';
-import { isCloudConfigured, cloudGet, cloudWatch, queryMyTournaments, getCurrentUser, onAuthChange, signInWithGoogle, signOutUser } from './cloud.js';
+import { isCloudConfigured, cloudGet, cloudWatch, queryMyTournaments, getCurrentUser, onAuthChange, signInWithGoogle, signOutUser, recordUsage, getAllUserSettings, getAllTournaments } from './cloud.js';
 import { uid, shuffle } from './util.js';
 
 const appEl = document.getElementById('app');
+// Sinu enda konto e-mail — ainult sellel kontol näidatakse "Admin" vaadet
+// (kasutuse jälgimine: millal keegi äppi kasutanud on ja kas turniirid lõpuni mängiti).
+const ADMIN_EMAIL = 'janar.meho@gmail.com';
 const badgeEl = document.getElementById('viewOnlyBadge');
 const liveBadgeEl = document.getElementById('liveBadge');
 const cloudErrorEl = document.getElementById('cloudErrorBanner');
@@ -270,6 +273,11 @@ function fmtTime(d) {
   return d.toLocaleTimeString('et-EE', { hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
+function fmtDateTime(ts) {
+  if (!ts) return '—';
+  return `${fmtDate(ts)} ${fmtTime(new Date(ts))}`;
+}
+
 // Iga vooru alguse/lõpuaeg turniiri algusaja ning mängu+pausi pikkuse järgi.
 function roundTimeWindows(t) {
   const [h, m] = (t.settings.startTime || '09:00').split(':').map((x) => parseInt(x, 10) || 0);
@@ -306,13 +314,17 @@ async function renderHome() {
     } catch (err) {
       console.error('Minu turniiride laadimine ebaõnnestus', err);
     }
+    // "Millal kasutas" jälgimiseks — ei blokeeri lehe laadimist, kui ebaõnnestub.
+    recordUsage(user).catch((err) => console.error('Kasutuse salvestamine ebaõnnestus', err));
   }
+  const isAdmin = !!(user && user.email === ADMIN_EMAIL);
   const tournaments = State.loadAll();
   appEl.innerHTML = `
     <div class="card">
       <div class="row-between">
         <h1>Minu turniirid</h1>
         <div class="row-gap">
+          ${isAdmin ? `<button class="btn btn-secondary" id="adminBtn">🛡️ Admin</button>` : ''}
           ${user ? `<button class="btn btn-secondary" id="courtNamesBtn">🏟️ Väljakute nimed</button>` : ''}
           <button class="btn btn-primary" id="newBtn">+ Loo uus turniir</button>
         </div>
@@ -347,6 +359,8 @@ async function renderHome() {
     </div>
   `;
   document.getElementById('newBtn').addEventListener('click', () => renderSettingsScreen(null));
+  const adminBtn = document.getElementById('adminBtn');
+  if (adminBtn) adminBtn.addEventListener('click', () => renderAdminScreen());
   const courtNamesBtn = document.getElementById('courtNamesBtn');
   if (courtNamesBtn) {
     courtNamesBtn.addEventListener('click', () => {
@@ -422,6 +436,90 @@ function renderCourtNamesEditor(box) {
     });
   };
   draw();
+}
+
+// Turniir loetakse "lõpuni mängituks", kui VIIMASE vooru kõigil mängudel on tulemus
+// sisestatud — sõltumata sellest, kas keegi vajutas ka "Lõpeta turniir" nuppu (see
+// jätab käsitsi tegemata jäetud lõpetamise tuvastamata, kui skoorid on tegelikult olemas).
+function isTournamentCompleted(t) {
+  if (!t.slots || !t.slots.length) return false;
+  const lastSlot = t.slots[t.slots.length - 1];
+  if (!lastSlot || !lastSlot.matches || !lastSlot.matches.length) return false;
+  return lastSlot.matches.every((m) => m.score1 != null && m.score2 != null);
+}
+
+// Admin-vaade (ainult ADMIN_EMAIL kontole): näitab iga kasutaja jaoks, millal ta
+// viimati äppi kasutas ja millised turniirid ta lõi (ning kas need lõpuni mängiti).
+async function renderAdminScreen() {
+  stopLiveSync();
+  stopRoundTimer();
+  appEl.innerHTML = `<div class="card"><p class="muted">Laen kasutuse andmeid…</p></div>`;
+  let users = [];
+  let tournaments = [];
+  try {
+    [users, tournaments] = await Promise.all([getAllUserSettings(), getAllTournaments()]);
+  } catch (err) {
+    appEl.innerHTML = `
+      <div class="card">
+        <h1>Viga andmete laadimisel</h1>
+        <p class="muted">${escapeHtml(err.message)}</p>
+        <button class="btn btn-secondary" id="backHomeBtn">← Tagasi</button>
+      </div>`;
+    document.getElementById('backHomeBtn').addEventListener('click', () => renderHome());
+    return;
+  }
+
+  const tournamentsByUid = {};
+  tournaments.forEach((t) => {
+    const key = t.ownerUid || '(teadmata)';
+    (tournamentsByUid[key] = tournamentsByUid[key] || []).push(t);
+  });
+  const sortedUsers = [...users].sort((a, b) => (b.lastActiveAt || 0) - (a.lastActiveAt || 0));
+
+  const userCards = sortedUsers
+    .map((u) => {
+      const userTournaments = (tournamentsByUid[u.id] || []).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+      const completedCount = userTournaments.filter(isTournamentCompleted).length;
+      const label = u.displayName || u.email || u.id;
+      return `
+        <div class="card">
+          <div>
+            <strong>${escapeHtml(label)}</strong>${u.email && u.displayName ? `<span class="muted small"> · ${escapeHtml(u.email)}</span>` : ''}
+            <div class="muted small">Viimati aktiivne: ${fmtDateTime(u.lastActiveAt)} · Külastusi: ${u.visitCount || 0} · Turniire: ${userTournaments.length} (lõpetatud ${completedCount})</div>
+          </div>
+          ${
+            userTournaments.length
+              ? `<table class="table">
+                  <thead><tr><th>Turniir</th><th>Loodud</th><th>Staatus</th></tr></thead>
+                  <tbody>
+                    ${userTournaments
+                      .map(
+                        (t) => `<tr>
+                          <td>${escapeHtml(t.name || '')}</td>
+                          <td>${fmtDateTime(t.createdAt)}</td>
+                          <td>${isTournamentCompleted(t) ? '✅ Lõpetatud' : t.phase === 'done' ? '🏁 Märgitud lõppenuks' : '⏳ Pooleli'}</td>
+                        </tr>`
+                      )
+                      .join('')}
+                  </tbody>
+                </table>`
+              : `<p class="muted small">Ühtegi turniiri veel loodud.</p>`
+          }
+        </div>`;
+    })
+    .join('');
+
+  appEl.innerHTML = `
+    <div class="card">
+      <div class="row-between">
+        <h1>Admin — kasutuse jälgimine</h1>
+        <button class="btn btn-secondary" id="backHomeBtn">← Tagasi</button>
+      </div>
+      <p class="muted small">${sortedUsers.length} kasutajat, ${tournaments.length} turniiri kokku.</p>
+    </div>
+    ${userCards}
+  `;
+  document.getElementById('backHomeBtn').addEventListener('click', () => renderHome());
 }
 
 function escapeHtml(s) {
